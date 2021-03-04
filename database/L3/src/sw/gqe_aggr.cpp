@@ -21,35 +21,16 @@
 // L3
 #include "xf_database/gqe_aggr.hpp"
 
+#include <inaccel/coral>
+#include <sys/time.h>
+#include <ctime>
+
 namespace xf {
 namespace database {
 namespace gqe {
-Aggregator::Aggregator(std::string xclbin) {
-    xclbin_path = xclbin;
-    err = xf::database::gqe::init_hardware(&ctx, &dev_id, &cq,
-                                           CL_QUEUE_PROFILING_ENABLE | CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE);
-    if (err != CL_SUCCESS) {
-        fprintf(stderr, "ERROR: fail to init hardware\n");
-        exit(1);
-    }
+Aggregator::Aggregator() {}
 
-    err = xf::database::gqe::load_binary(&prg, ctx, dev_id, xclbin_path.c_str());
-    if (err != CL_SUCCESS) {
-        fprintf(stderr, "ERROR: fail to program PL\n");
-        exit(1);
-    }
-}
-
-Aggregator::~Aggregator() {
-    err = clReleaseProgram(prg);
-    if (err != CL_SUCCESS) {
-        std::cout << "deconstructor" << std::endl;
-        exit(1);
-    }
-
-    clReleaseCommandQueue(cq);
-    clReleaseContext(ctx);
-};
+Aggregator::~Aggregator() {};
 
 ErrCode Aggregator::aggregate(Table& tab_in,
                               std::vector<EvaluationInfo> evals_info,
@@ -109,7 +90,6 @@ ErrCode Aggregator::aggr_sol0(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
     for (int i = 0; i < tab_out_col_num; i++) {
         tab_out_col_type[i] = tab_out.getColTypeSize(i);
     }
-    gqe::utils::MM mm;
 
     //--------------- get sw scan input host bufer -----------------
     std::vector<int8_t> scan_list = aggr_cfg.getScanList();
@@ -122,18 +102,18 @@ ErrCode Aggregator::aggr_sol0(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
     }
     std::cout << std::endl;
 #endif
-    char* table_in_col[8];
+    char* table_in_col[tab_in_col_num];
     for (int i = 0; i < tab_in_col_num; i++) {
         table_in_col[i] = tab_in.getColPointer(scan_list[i]);
     }
-    for (int i = tab_in_col_num; i < 8; i++) table_in_col[i] = mm.aligned_alloc<char>(tb_in_col_size);
 
     //--------------- get output host bufer -----------------
     size_t table_result_depth = (result_nrow + VEC_LEN - 1) / VEC_LEN;
     size_t table_result_size = table_result_depth * size_of_apu512;
-    char* table_out_col[16];
+    std::vector<inaccel::vector<char>> table_out_col(16);
     for (int i = 0; i < 16; i++) {
-        table_out_col[i] = mm.aligned_alloc<char>(table_result_size);
+	inaccel::vector<char> tmp_out(table_result_size);
+        table_out_col[i] = tmp_out;
     }
 
     MetaTable meta_aggr_in;
@@ -149,13 +129,6 @@ ErrCode Aggregator::aggr_sol0(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
     ap_uint<32>* table_cfg = aggr_cfg.getAggrConfigBits();
 
     ap_uint<32>* table_cfg_out = aggr_cfg.getAggrConfigOutBits();
-    // build kernel
-    cl_kernel agg_kernel = clCreateKernel(prg, "gqeAggr", &err);
-    if (err != CL_SUCCESS) {
-        fprintf(stderr, "ERROR: failed to create kernel.\n");
-        exit(1);
-    }
-    std::cout << "Kernel has been created\n";
 
 #ifdef USER_DEBUG
     std::cout << "debug 0" << std::endl;
@@ -168,101 +141,50 @@ ErrCode Aggregator::aggr_sol0(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
 #endif
 
     //--------------- get output host bufer -----------------
-    cl_mem_ext_ptr_t mext_table_in_col[8];
-    cl_mem_ext_ptr_t mext_meta_aggr_in, mext_meta_aggr_out, mext_cfg, mext_cfg_out;
-    cl_mem_ext_ptr_t mext_table_out[16], memExt[8];
+    std::vector<inaccel::vector<char>> mext_table_in_col(8);
+    inaccel::vector<ap_uint<512>> mext_meta_in(24), mext_meta_out(24);
+    inaccel::vector<ap_uint<32>> mext_cfg((4 * 128)/sizeof(ap_uint<32>)), mext_cfg_out((4 * 128)/sizeof(ap_uint<32>));
 
-    int agg_i = 0;
     for (int i = 0; i < 8; i++) {
-        mext_table_in_col[i] = {agg_i++, table_in_col[i], agg_kernel};
+	inaccel::vector<char> col_in(tb_in_col_size);
+	if( i < tab_in_col_num){
+		memcpy(col_in.data(),table_in_col[i],tb_in_col_size);
+	}
+        mext_table_in_col[i] = col_in;
     }
 
-    mext_meta_aggr_in = {agg_i++, meta_aggr_in.meta(), agg_kernel};
-    mext_meta_aggr_out = {agg_i++, meta_aggr_out.meta(), agg_kernel};
+    ap_uint<512>* meta_in = meta_aggr_in.meta();
+    ap_uint<512>* meta_out = meta_aggr_out.meta();
+    memcpy(mext_meta_in.data(),meta_in,sizeof(ap_uint<512>)*24);
+    memcpy(mext_meta_out.data(),meta_out,sizeof(ap_uint<512>)*24);
 
-    for (int i = 0; i < 16; ++i) {
-        mext_table_out[i] = {agg_i++, table_out_col[i], agg_kernel};
+    memcpy(mext_cfg.data(),table_cfg,size_t(4 * 128));
+    memcpy(mext_cfg_out.data(),table_cfg_out,size_t(4 * 128));
+
+    struct timeval time_now{};
+    gettimeofday(&time_now, nullptr);
+    time_t start = (time_now.tv_sec * 1000) + (time_now.tv_usec / 1000);
+
+    inaccel::request aggr("com.xilinx.vitis.database.gqeAggr");
+    for(int i = 0; i < 8; i++){
+	aggr.arg(mext_table_in_col[i]);
     }
-    mext_cfg = {agg_i++, table_cfg, agg_kernel};
-    mext_cfg_out = {agg_i++, table_cfg_out, agg_kernel};
-    for (int i = 0; i < 8; i++) {
-        memExt[i] = {agg_i++, nullptr, agg_kernel};
+    aggr.arg(mext_meta_in);
+    aggr.arg(mext_meta_out);
+    for( int i = 0; i < 16; i++){
+	aggr.arg(table_out_col[i]);
     }
+    aggr.arg(mext_cfg);
+    aggr.arg(mext_cfg_out);
 
-    cl_mem buf_tb_in_col[8];
-    for (int i = 0; i < 8; ++i) {
-        buf_tb_in_col[i] = clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                          tb_in_col_size, &mext_table_in_col[i], &err);
-    }
-    cl_mem buf_meta_aggr_in = clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                             (sizeof(ap_uint<512>) * 24), &mext_meta_aggr_in, &err);
+    inaccel::wait(inaccel::submit(aggr));
 
-    cl_mem buf_meta_aggr_out = clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_WRITE,
-                                              (sizeof(ap_uint<512>) * 24), &mext_meta_aggr_out, &err);
-    cl_mem buf_cfg = clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                    size_t(4 * 128), &mext_cfg, &err);
-    cl_mem buf_cfg_out = clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_WRITE,
-                                        size_t(4 * 128), &mext_cfg_out, &err);
-    cl_mem buf_tb_out_col[16];
-    for (int i = 0; i < 16; ++i) {
-        buf_tb_out_col[i] = clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_WRITE,
-                                           table_result_size, &mext_table_out[i], &err);
-    }
+    gettimeofday(&time_now, nullptr);
+    time_t end = (time_now.tv_sec * 1000) + (time_now.tv_usec / 1000);
 
-    cl_mem buf_tmp[8];
-    for (int i = 0; i < 8; i++) {
-        buf_tmp[i] = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS | CL_MEM_EXT_PTR_XILINX,
-                                    (size_t)(8 * S_BUFF_DEPTH), &memExt[i], &err);
-    }
+    memcpy(meta_out,mext_meta_out.data(),24*sizeof(ap_uint<512>));
+    memcpy(table_cfg_out,mext_cfg_out.data(),size_t(4 * 128));
 
-    // set args and enqueue kernel
-    int j = 0;
-    clSetKernelArg(agg_kernel, j++, sizeof(cl_mem), &buf_tb_in_col[0]);
-    clSetKernelArg(agg_kernel, j++, sizeof(cl_mem), &buf_tb_in_col[1]);
-    clSetKernelArg(agg_kernel, j++, sizeof(cl_mem), &buf_tb_in_col[2]);
-    clSetKernelArg(agg_kernel, j++, sizeof(cl_mem), &buf_tb_in_col[3]);
-    clSetKernelArg(agg_kernel, j++, sizeof(cl_mem), &buf_tb_in_col[4]);
-    clSetKernelArg(agg_kernel, j++, sizeof(cl_mem), &buf_tb_in_col[5]);
-    clSetKernelArg(agg_kernel, j++, sizeof(cl_mem), &buf_tb_in_col[6]);
-    clSetKernelArg(agg_kernel, j++, sizeof(cl_mem), &buf_tb_in_col[7]);
-    clSetKernelArg(agg_kernel, j++, sizeof(cl_mem), &buf_meta_aggr_in);
-    clSetKernelArg(agg_kernel, j++, sizeof(cl_mem), &buf_meta_aggr_out);
-    for (int k = 0; k < 16; k++) {
-        clSetKernelArg(agg_kernel, j++, sizeof(cl_mem), &buf_tb_out_col[k]);
-    }
-    clSetKernelArg(agg_kernel, j++, sizeof(cl_mem), &buf_cfg);
-    clSetKernelArg(agg_kernel, j++, sizeof(cl_mem), &buf_cfg_out);
-    for (int k = 0; k < 8; k++) {
-        clSetKernelArg(agg_kernel, j++, sizeof(cl_mem), &buf_tmp[k]);
-    }
-
-    std::vector<cl_mem> in_vec;
-    for (int i = 0; i < tab_in_col_num; i++) {
-        in_vec.push_back(buf_tb_in_col[i]);
-    }
-    in_vec.push_back(buf_meta_aggr_in);
-    in_vec.push_back(buf_meta_aggr_out);
-    in_vec.push_back(buf_cfg);
-
-    std::vector<cl_mem> out_vec;
-    for (int i = 0; i < 16; ++i) {
-        out_vec.push_back(buf_tb_out_col[i]);
-    }
-    out_vec.push_back(buf_meta_aggr_out);
-
-    std::array<cl_event, 1> evt_h2d;
-    std::array<cl_event, 1> evt_krn;
-    std::array<cl_event, 1> evt_d2h;
-    // step 1 h2d
-    clEnqueueMigrateMemObjects(cq, in_vec.size(), in_vec.data(), 0, 0, nullptr, &evt_h2d[0]);
-
-    // step 2 run kernel
-    clEnqueueTask(cq, agg_kernel, 1, evt_h2d.data(), &evt_krn[0]);
-
-    // step 3 d2h
-    clEnqueueMigrateMemObjects(cq, out_vec.size(), out_vec.data(), CL_MIGRATE_MEM_OBJECT_HOST, 1, evt_krn.data(),
-                               &evt_d2h[0]);
-    clFinish(cq);
     std::cout << "finished data transfer d2h" << std::endl;
     int nrow = meta_aggr_out.getColLen();
     std::cout << "After Aggr Row Num:" << nrow << std::endl;
@@ -292,11 +214,7 @@ ErrCode Aggregator::aggr_sol0(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
 
     std::cout << "------------------------Performance Info------------------------" << std::endl;
 
-    cl_ulong start1, end1;
-    clGetEventProfilingInfo(evt_krn[0], CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start1, NULL);
-    clGetEventProfilingInfo(evt_krn[0], CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end1, NULL);
-    long kerneltime1 = (end1 - start1) / 1000000;
-    std::cout << std::dec << "Kernel execution time " << kerneltime1 << " ms" << std::endl;
+    std::cout << std::dec << "Total execution time " << end - start << " ms" << std::endl;
 
     char** cos_of_table_out = new char*[output_col_num];
     std::cout << "output_col_num:" << output_col_num << std::endl;
@@ -309,15 +227,15 @@ ErrCode Aggregator::aggr_sol0(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
             int col_size = sizeof(int);
             if (index.size() == 1) {
                 int tmp = 0;
-                memcpy(&tmp, table_out_col[index[0]] + j * col_size, col_size);
+                memcpy(&tmp, table_out_col[index[0]].data() + j * col_size, col_size);
                 int64_t tmp_64b = tmp;
                 memcpy(cos_of_table_out[i] + j * tab_out_col_type[i], &tmp_64b, tab_out_col_type[j]);
 
             } else if (index.size() == 2) {
                 ap_uint<32> low_bits = 0;
                 ap_uint<32> high_bits = 0;
-                memcpy(&low_bits, table_out_col[index[0]] + j * col_size, col_size);
-                memcpy(&high_bits, table_out_col[index[1]] + j * col_size, col_size);
+                memcpy(&low_bits, table_out_col[index[0]].data() + j * col_size, col_size);
+                memcpy(&high_bits, table_out_col[index[1]].data() + j * col_size, col_size);
                 uint64_t merge_result = (ap_uint<64>)(high_bits, low_bits);
                 memcpy(cos_of_table_out[i] + j * tab_out_col_type[i], &merge_result, tab_out_col_type[j]);
             } else {
@@ -332,7 +250,7 @@ ErrCode Aggregator::aggr_sol0(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
 
     return SUCCESS;
 }
-
+/*
 struct queue_struct {
     // the sec index
     int sec;
@@ -649,8 +567,9 @@ class threading_pool_for_aggr_pip {
         aggr_out_pong_t = std::thread(&threading_pool_for_aggr_pip::aggr_memcpy_out_pong_t, this);
     }
 };
-
+*/
 ErrCode Aggregator::aggr_sol1(Table& tab_in, Table& tab_out, AggrConfig& aggr_cfg, std::vector<size_t> params) {
+/*
     const int VEC_LEN = 16;
     const int size_of_apu512 = sizeof(ap_uint<512>);
 
@@ -1203,9 +1122,10 @@ ErrCode Aggregator::aggr_sol1(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
     std::cout << "Output number = " << pool.ping_merge_map.size() << std::endl;
     std::cout << "Aggr done, table saved: " << tab_out.getRowNum() << " rows," << tab_out.getColNum() << " cols"
               << std::endl;
+*/
     return SUCCESS;
 }
-class threading_pool_for_aggr_part {
+/*class threading_pool_for_aggr_part {
    public:
     std::thread part_l_in_ping_t;
     std::thread part_l_in_pong_t;
@@ -1548,8 +1468,9 @@ inline void zipInt64(void* dest, const void* low, const void* high, size_t n) {
         }
     }
 }
-
+*/
 ErrCode Aggregator::aggr_sol2(Table& tab_in, Table& tab_out, AggrConfig& aggr_cfg, std::vector<size_t> params) {
+/*
     const int VEC_LEN = 16;
     const int size_of_apu512 = sizeof(ap_uint<512>);
     gqe::utils::MM mm;
@@ -2477,6 +2398,7 @@ ErrCode Aggregator::aggr_sol2(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
 
     std::cout << "Aggr done, table saved: " << tab_out.getRowNum() << " rows," << tab_out.getColNum() << " cols"
               << std::endl;
+*/
     return SUCCESS;
 }
 

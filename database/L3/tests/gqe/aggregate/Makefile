@@ -74,7 +74,7 @@ include ./utils.mk
 XDEVICE := $(call device2xsa, $(DEVICE))
 TEMP_DIR := _x_temp.$(TARGET).$(XDEVICE)
 TEMP_REPORT_DIR := $(CUR_DIR)/reports/_x.$(TARGET).$(XDEVICE)
-BUILD_DIR := build_dir.$(TARGET).$(XDEVICE)
+BUILD_DIR := build_dir
 BUILD_REPORT_DIR := $(CUR_DIR)/reports/_build.$(TARGET).$(XDEVICE)
 EMCONFIG_DIR := $(BUILD_DIR)
 XCLBIN_DIR := $(CUR_DIR)/$(BUILD_DIR)
@@ -85,7 +85,6 @@ export XCL_BINDIR = $(XCLBIN_DIR)
 HOST_SRCS += $(CUR_DIR)/host/test_q1.cpp
 HOST_SRCS += $(XFLIB_DIR)/L3/src/sw/gqe_table.cpp
 HOST_SRCS += $(XFLIB_DIR)/L3/src/sw/gqe_aggr_config.cpp
-HOST_SRCS += $(XFLIB_DIR)/L3/src/sw/gqe_ocl.cpp
 HOST_SRCS += $(XFLIB_DIR)/L3/src/sw/gqe_aggr.cpp
 CXXFLAGS += -I$(XFLIB_DIR)/L1/include/hw
 CXXFLAGS += -I$(XFLIB_DIR)/L1/include/sw
@@ -106,13 +105,14 @@ CXXFLAGS += -D HW_EMU_TEST
 endif
 
 # ######################### Host compiler global settings ############################
-CXXFLAGS += -I$(XILINX_XRT)/include -I$(XILINX_VIVADO)/include -std=c++11 -O3 -Wall -Wno-unknown-pragmas -Wno-unused-label
-LDFLAGS += -L$(XILINX_XRT)/lib -lOpenCL -lpthread -lrt -Wno-unused-label -Wno-narrowing -DVERBOSE
+CXXFLAGS += -std=c++11 -O3 -Wall -Wno-unknown-pragmas -Wno-unused-label
+LDFLAGS += -lcoral-api -lpthread -lrt -Wno-unused-label -Wno-narrowing -DVERBOSE
 CXXFLAGS += -fmessage-length=0 -O3 -D XDEVICE=$(XDEVICE)
-CXXFLAGS += -I$(CUR_DIR)/src/ 
+CXXFLAGS += -I$(CUR_DIR)/src/
+CXXFLAGS += -I$(XFLIB_DIR)/ap_int_include/
 
 ifeq ($(HOST_ARCH), x86)
-LDFLAGS += -L$(XILINX_VIVADO)/lnx64/tools/fpo_v7_0 -Wl,--as-needed -lgmp -lmpfr -lIp_floating_point_v7_0_bitacc_cmodel
+LDFLAGS += -Wl,--as-needed
 endif
 
 # ################### Setting package and image directory #######################
@@ -180,7 +180,7 @@ BINARY_CONTAINER_gqe_aggr_part_OBJS += $(TEMP_DIR)/gqePart.xo
 all: check_vpp check_platform  $(EXE_FILE) $(BINARY_CONTAINERS) emconfig
 
 .PHONY: host
-host: check_xrt check_sysroot $(EXE_FILE)
+host: check_sysroot $(EXE_FILE)
 
 .PHONY: xclbin
 xclbin: check_vpp check_sysroot $(BINARY_CONTAINERS)
@@ -205,7 +205,7 @@ $(BINARY_CONTAINERS): $(BINARY_CONTAINER_gqe_aggr_part_OBJS)
 
 
 # ################# Setting Rules for Host (Building Host Executable) ################
-$(EXE_FILE): $(HOST_SRCS) | check_xrt
+$(EXE_FILE): $(HOST_SRCS)
 	mkdir -p $(BUILD_DIR)
 	$(CXX) -o $@ $^ $(CXXFLAGS) $(LDFLAGS)
 

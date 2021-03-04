@@ -43,11 +43,6 @@ int main(int argc, const char* argv[]) {
 
     // cmd arg parser.
     x_utils::ArgParser parser(argc, argv);
-    std::string xclbin_path;
-    if (!parser.getCmdOption("-xclbin", xclbin_path)) {
-        std::cout << "ERROR: xclbin path is not set!\n";
-        return 1;
-    }
 
     std::string in_dir;
     if (!parser.getCmdOption("-in", in_dir)) {
@@ -87,7 +82,7 @@ int main(int argc, const char* argv[]) {
     std::cout << "Read Input table form " << in_dir_dat << std::endl;
 
     std::string mode = "manual";
-    size_t solution = 2;
+    size_t solution = 0;
     size_t sec_l = 2;
     size_t slice_num = 4;
     size_t log_part = 2;
@@ -99,7 +94,7 @@ int main(int argc, const char* argv[]) {
             try {
                 solution = std::stoi(scale);
             } catch (...) {
-                solution = 2;
+                solution = 0;
             }
         }
         std::cout << "Select solution:" << solution << std::endl;
@@ -267,7 +262,7 @@ int main(int argc, const char* argv[]) {
     tab_c.addCol("c9", gqe::TypeEnum::TypeInt64, table_c_nrow);
 
     // constructor
-    gqe::Aggregator bigaggr(xclbin_path);
+    gqe::Aggregator bigaggr;
 
     auto smanual = new gqe::AggrStrategyManualSet(solution, sec_l, slice_num, log_part);
     gqe::ErrCode err_code;

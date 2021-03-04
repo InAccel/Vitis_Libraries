@@ -26,7 +26,6 @@
 #include <cstdio>
 #include <queue>
 // L3
-#include "xf_database/gqe_ocl.hpp"
 #include "xf_database/gqe_aggr_config.hpp"
 #include "xf_database/gqe_aggr_strategy.hpp"
 
@@ -69,12 +68,6 @@ struct KeyHasher {
 class Aggregator {
    private:
     // for platform init
-    cl_int err;
-    cl_context ctx;
-    cl_device_id dev_id;
-    cl_command_queue cq;
-    cl_program prg;
-    std::string xclbin_path;
     enum { PU_NM = 8, VEC_SCAN = 8, S_BUFF_DEPTH = (1 << 25) };
     // solutions:
     ErrCode aggr_sol0(Table& tab_in, Table& tab_out, AggrConfig& aggr_cfg, std::vector<size_t> params);
@@ -87,10 +80,8 @@ class Aggregator {
     /**
      * @brief construct of Aggregator.
      *
-     * @param xclbin xclbin path
-     *
      */
-    Aggregator(std::string xclbin);
+    Aggregator();
 
     ~Aggregator();
 
