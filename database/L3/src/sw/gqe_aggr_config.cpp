@@ -659,8 +659,7 @@ AggrConfig::AggrConfig(Table tab_a,
     table_cfg = acmd.getConfigBits();
     table_out_cfg = acmd.getConfigOutBits();
 
-    table_cfg_part = mm.aligned_alloc<ap_uint<512> >(9);
-    memset(table_cfg_part, 0, sizeof(ap_uint<512>) * 9);
+    table_cfg_part = (ap_uint<512>*)cube_alloc(sizeof(ap_uint<512>) * 9);
     table_cfg_part[0] = 1;
     table_cfg_part[5].range(415, 415) = 1;
     table_cfg_part[8].range(415, 415) = 1;

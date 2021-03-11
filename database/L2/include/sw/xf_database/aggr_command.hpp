@@ -26,6 +26,8 @@
 // L2
 #include "xf_database/gqe_utils.hpp"
 
+#include <inaccel/coral.h>
+
 namespace xf {
 namespace database {
 
@@ -75,11 +77,8 @@ class AggrCommand {
      */
 
     AggrCommand() {
-        hbuf = gqe::utils::aligned_alloc<ap_uint<W> >(size);
-        hbuf_out = gqe::utils::aligned_alloc<ap_uint<W> >(size);
-
-        memset(hbuf, 0, sizeof(ap_uint<W>) * size);
-        memset(hbuf_out, 0, sizeof(ap_uint<W>) * size);
+		hbuf = (ap_uint<W>*)cube_alloc(sizeof(ap_uint<W>)*size);
+		hbuf_out = (ap_uint<W>*)cube_alloc(sizeof(ap_uint<W>)*size);
         // filter defalut
         hbuf[66] = (1 << 31);
         // demux mux direct_aggr

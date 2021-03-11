@@ -21,7 +21,7 @@
 // L3
 #include "xf_database/gqe_aggr.hpp"
 
-#include <inaccel/coral>
+#include <inaccel/coral.h>
 #include <sys/time.h>
 #include <ctime>
 
@@ -110,10 +110,13 @@ ErrCode Aggregator::aggr_sol0(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
     //--------------- get output host bufer -----------------
     size_t table_result_depth = (result_nrow + VEC_LEN - 1) / VEC_LEN;
     size_t table_result_size = table_result_depth * size_of_apu512;
-    std::vector<inaccel::vector<char>> table_out_col(16);
+	char* table_out_col[16];
     for (int i = 0; i < 16; i++) {
-	inaccel::vector<char> tmp_out(table_result_size);
-        table_out_col[i] = tmp_out;
+        table_out_col[i] = (char*) cube_alloc(table_result_size);
+	if(!table_out_col[i]){
+		std::cout<< "Error at alloc" << std::endl;
+		exit(1);
+	}
     }
 
     MetaTable meta_aggr_in;
@@ -141,49 +144,50 @@ ErrCode Aggregator::aggr_sol0(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
 #endif
 
     //--------------- get output host bufer -----------------
-    std::vector<inaccel::vector<char>> mext_table_in_col(8);
-    inaccel::vector<ap_uint<512>> mext_meta_in(24), mext_meta_out(24);
-    inaccel::vector<ap_uint<32>> mext_cfg((4 * 128)/sizeof(ap_uint<32>)), mext_cfg_out((4 * 128)/sizeof(ap_uint<32>));
+    char* mext_table_in_col[8];
 
     for (int i = 0; i < 8; i++) {
-	inaccel::vector<char> col_in(tb_in_col_size);
-	if( i < tab_in_col_num){
-		memcpy(col_in.data(),table_in_col[i],tb_in_col_size);
-	}
-        mext_table_in_col[i] = col_in;
+        mext_table_in_col[i] = (char*) cube_alloc(tb_in_col_size);
+	if(!mext_table_in_col[i]){
+                std::cout<< "Error at alloc" << std::endl;
+                exit(1);
+        }
+        if( i < tab_in_col_num){
+                memcpy(mext_table_in_col[i], table_in_col[i], tb_in_col_size);
+        }
     }
 
     ap_uint<512>* meta_in = meta_aggr_in.meta();
     ap_uint<512>* meta_out = meta_aggr_out.meta();
-    memcpy(mext_meta_in.data(),meta_in,sizeof(ap_uint<512>)*24);
-    memcpy(mext_meta_out.data(),meta_out,sizeof(ap_uint<512>)*24);
-
-    memcpy(mext_cfg.data(),table_cfg,size_t(4 * 128));
-    memcpy(mext_cfg_out.data(),table_cfg_out,size_t(4 * 128));
 
     struct timeval time_now{};
-    gettimeofday(&time_now, nullptr);
+	gettimeofday(&time_now, nullptr);
     time_t start = (time_now.tv_sec * 1000) + (time_now.tv_usec / 1000);
 
-    inaccel::request aggr("com.xilinx.vitis.database.gqeAggr");
+    request request = request_create("com.xilinx.vitis.database.gqeAggr");
+    int j = 0;
     for(int i = 0; i < 8; i++){
-	aggr.arg(mext_table_in_col[i]);
+            request_arg(request, j++, 0, mext_table_in_col[i]);
     }
-    aggr.arg(mext_meta_in);
-    aggr.arg(mext_meta_out);
+    request_arg(request, j++, 0, meta_in);
+    request_arg(request, j++, 0, meta_out);
     for( int i = 0; i < 16; i++){
-	aggr.arg(table_out_col[i]);
+            request_arg(request, j++, 0, table_out_col[i]);
     }
-    aggr.arg(mext_cfg);
-    aggr.arg(mext_cfg_out);
+    request_arg(request, j++, 0, table_cfg);
+    request_arg(request, j++, 0, table_cfg_out);
 
-    inaccel::wait(inaccel::submit(aggr));
+    session response = inaccel_submit(request);
+	if(!response){
+		printf("Error at submit\n");
+		exit(1);
+	}
+    printf("%d\n", inaccel_wait(response));
+    request_free(request);
+
 
     gettimeofday(&time_now, nullptr);
     time_t end = (time_now.tv_sec * 1000) + (time_now.tv_usec / 1000);
-
-    memcpy(meta_out,mext_meta_out.data(),24*sizeof(ap_uint<512>));
-    memcpy(table_cfg_out,mext_cfg_out.data(),size_t(4 * 128));
 
     std::cout << "finished data transfer d2h" << std::endl;
     int nrow = meta_aggr_out.getColLen();
@@ -227,15 +231,14 @@ ErrCode Aggregator::aggr_sol0(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
             int col_size = sizeof(int);
             if (index.size() == 1) {
                 int tmp = 0;
-                memcpy(&tmp, table_out_col[index[0]].data() + j * col_size, col_size);
+                memcpy(&tmp, table_out_col[index[0]] + j * col_size, col_size);
                 int64_t tmp_64b = tmp;
                 memcpy(cos_of_table_out[i] + j * tab_out_col_type[i], &tmp_64b, tab_out_col_type[j]);
-
             } else if (index.size() == 2) {
                 ap_uint<32> low_bits = 0;
                 ap_uint<32> high_bits = 0;
-                memcpy(&low_bits, table_out_col[index[0]].data() + j * col_size, col_size);
-                memcpy(&high_bits, table_out_col[index[1]].data() + j * col_size, col_size);
+                memcpy(&low_bits, table_out_col[index[0]] + j * col_size, col_size);
+                memcpy(&high_bits, table_out_col[index[1]] + j * col_size, col_size);
                 uint64_t merge_result = (ap_uint<64>)(high_bits, low_bits);
                 memcpy(cos_of_table_out[i] + j * tab_out_col_type[i], &merge_result, tab_out_col_type[j]);
             } else {
@@ -1105,352 +1108,22 @@ ErrCode Aggregator::aggr_sol1(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
     }
     timer_merge.add(); // 1
     std::cout << merge_info.size() << " cols," << row_counter << " rows" << std::endl;
-
     double in1_bytes = (double)l_nrow * sizeof(int) * l_ncol / 1024 / 1024;
     double out_bytes = (double)pool.ping_merge_map.size() * sizeof(int) * out_ncol / 1024 / 1024;
     std::cout << "-----------------------Data Transfer Info-----------------------" << std::endl;
     std::cout << "H2D size = " << in1_bytes << " MB" << std::endl;
     std::cout << "D2H size = " << out_bytes << " MB" << std::endl;
-
     std::cout << "-----------------------Performance Info-----------------------" << std::endl;
-
     double tvtime_merge = timer_merge.getMilliSec();
     std::cout << "All time: " << (double)(tvtime_aggr + tvtime_merge) / 1000
               << " ms, throughput: " << in1_bytes / 1024 / ((double)(tvtime_aggr + tvtime_merge) / 1000000) << " GB/s"
               << std::endl;
-
     std::cout << "Output number = " << pool.ping_merge_map.size() << std::endl;
     std::cout << "Aggr done, table saved: " << tab_out.getRowNum() << " rows," << tab_out.getColNum() << " cols"
               << std::endl;
 */
     return SUCCESS;
 }
-/*class threading_pool_for_aggr_part {
-   public:
-    std::thread part_l_in_ping_t;
-    std::thread part_l_in_pong_t;
-    std::thread part_l_out_ping_t;
-    std::thread part_l_out_pong_t;
-
-    std::thread aggr_in_ping_t;
-    std::thread aggr_in_pong_t;
-    std::thread aggr_out_ping_t;
-    std::thread aggr_out_pong_t;
-
-    std::queue<queue_struct> q2_ping; // part l memcpy in used queue
-    std::queue<queue_struct> q2_pong; // part l memcpy in used queue
-    std::queue<queue_struct> q3_ping; // part l memcpy out used queue
-    std::queue<queue_struct> q3_pong; // part l memcpy out used queue
-    std::queue<queue_struct> q7_ping; // aggr memcpy in used queue
-    std::queue<queue_struct> q7_pong; // aggr memcpy in used queue
-
-    std::queue<queue_struct> q8_ping; // aggr memcpy out queue
-    std::queue<queue_struct> q8_pong; // aggr memcpy out queue
-
-    // the flag indicate each thread is running
-    std::atomic<bool> q2_ping_run;
-    std::atomic<bool> q2_pong_run;
-    std::atomic<bool> q3_ping_run;
-    std::atomic<bool> q3_pong_run;
-    std::atomic<bool> q4_run;
-    std::atomic<bool> q5_run_ping;
-    std::atomic<bool> q5_run_pong;
-    std::atomic<bool> q6_run;
-    std::atomic<bool> q7_ping_run;
-    std::atomic<bool> q7_pong_run;
-    std::atomic<bool> q8_ping_run;
-    std::atomic<bool> q8_pong_run;
-
-    // the nrow of each partition
-    std::atomic<int> l_new_part_offset[256];
-    int toutrow[256][32];
-
-    // the total aggr num
-    std::atomic<int64_t> aggr_sum_nrow;
-
-    // the buffer size of each output partition of Tab L.
-    int l_partition_out_col_part_nrow_max;
-
-    // constructor
-    threading_pool_for_aggr_part() { aggr_sum_nrow = 0; };
-    // table L memcpy in thread
-    void part_l_memcpy_in_ping_t() {
-        while (q2_ping_run) {
-#ifdef Valgrind_debug
-            sleep(1);
-#endif
-            while (!q2_ping.empty()) {
-                queue_struct q = q2_ping.front();
-                clWaitForEvents(q.num_event_wait_list, q.event_wait_list);
-
-                for (int i = 0; i < q.valid_col_num; i++) {
-                    memcpy(q.ptr_dst[i], q.ptr_src[i], q.meta_nrow * q.tab_col_type_size[i]);
-                }
-
-                q.meta->setColNum(q.valid_col_num);
-                for (int i = 0; i < q.valid_col_num; i++) {
-                    q.meta->setCol(i, i, q.meta_nrow);
-                }
-                q.meta->meta();
-
-                clSetUserEventStatus(q.event[0], CL_COMPLETE);
-                // remove the first element after processing it.
-                q2_ping.pop();
-            }
-        }
-    };
-
-    // table L memcpy in thread
-    void part_l_memcpy_in_pong_t() {
-        while (q2_pong_run) {
-#ifdef Valgrind_debug
-            sleep(1);
-#endif
-            while (!q2_pong.empty()) {
-                queue_struct q = q2_pong.front();
-                clWaitForEvents(q.num_event_wait_list, q.event_wait_list);
-
-                for (int i = 0; i < q.valid_col_num; i++) {
-                    memcpy(q.ptr_dst[i], q.ptr_src[i], q.meta_nrow * q.tab_col_type_size[i]);
-                }
-
-                q.meta->setColNum(q.valid_col_num);
-                for (int i = 0; i < q.valid_col_num; i++) {
-                    q.meta->setCol(i, i, q.meta_nrow);
-                }
-                q.meta->meta();
-
-                clSetUserEventStatus(q.event[0], CL_COMPLETE);
-                // remove the first element after processing it.
-                q2_pong.pop();
-            }
-        }
-    };
-
-    // table L memcpy out thread
-    void part_l_memcpy_out_ping_t() {
-        while (q3_ping_run) {
-#ifdef Valgrind_debug
-            sleep(1);
-#endif
-            while (!q3_ping.empty()) {
-                queue_struct q = q3_ping.front();
-                clWaitForEvents(q.num_event_wait_list, q.event_wait_list);
-
-                int l_partition_out_col_part_depth = q.part_max_nrow_512;
-
-                int* nrow_per_part_l = q.meta->getPartLen();
-
-                for (int p = 0; p < q.partition_num; ++p) {
-                    int sec_partitioned_res_part_nrow = nrow_per_part_l[p];
-                    if (sec_partitioned_res_part_nrow > l_partition_out_col_part_nrow_max) {
-                        std::cerr << "partition out nrow: " << sec_partitioned_res_part_nrow
-                                  << ", buffer size: " << l_partition_out_col_part_nrow_max << std::endl;
-                        std::cerr << "ERROR: Table L output partition size is smaller than required!" << std::endl;
-                        exit(1);
-                    }
-
-                    int offset = l_new_part_offset[p];
-                    l_new_part_offset[p] += sec_partitioned_res_part_nrow;
-
-                    for (int i = 0; i < q.valid_col_num; i++) {
-                        memcpy(q.part_ptr_dst[p][i] + offset * q.tab_col_type_size[i],
-                               q.ptr_src[i] + p * l_partition_out_col_part_depth * sizeof(ap_uint<512>),
-                               q.tab_col_type_size[i] * sec_partitioned_res_part_nrow);
-                    }
-                }
-
-                clSetUserEventStatus(q.event[0], CL_COMPLETE);
-                q3_ping.pop();
-            }
-        }
-    };
-    // table L memcpy out thread
-    void part_l_memcpy_out_pong_t() {
-        while (q3_pong_run) {
-#ifdef Valgrind_debug
-            sleep(1);
-#endif
-            while (!q3_pong.empty()) {
-                queue_struct q = q3_pong.front();
-                clWaitForEvents(q.num_event_wait_list, q.event_wait_list);
-
-                int l_partition_out_col_part_depth = q.part_max_nrow_512;
-
-                int* nrow_per_part_l = q.meta->getPartLen();
-
-                for (int p = 0; p < q.partition_num; ++p) {
-                    int sec_partitioned_res_part_nrow = nrow_per_part_l[p];
-                    if (sec_partitioned_res_part_nrow > l_partition_out_col_part_nrow_max) {
-                        std::cerr << "partition out nrow: " << sec_partitioned_res_part_nrow
-                                  << ", buffer size: " << l_partition_out_col_part_nrow_max << std::endl;
-                        std::cerr << "ERROR: Table L output partition size is smaller than required!" << std::endl;
-                        exit(1);
-                    }
-
-                    int offset = l_new_part_offset[p];
-                    l_new_part_offset[p] += sec_partitioned_res_part_nrow;
-
-                    for (int i = 0; i < q.valid_col_num; i++) {
-                        memcpy(q.part_ptr_dst[p][i] + offset * q.tab_col_type_size[i],
-                               q.ptr_src[i] + p * l_partition_out_col_part_depth * sizeof(ap_uint<512>),
-                               q.tab_col_type_size[i] * sec_partitioned_res_part_nrow);
-                    }
-                }
-
-                clSetUserEventStatus(q.event[0], CL_COMPLETE);
-                q3_pong.pop();
-            }
-        }
-    };
-
-    void aggr_memcpy_in_ping_t() {
-        while (q7_ping_run) {
-#ifdef Valgrind_debug
-            sleep(1);
-#endif
-            while (!q7_ping.empty()) {
-                queue_struct q = q7_ping.front();
-                clWaitForEvents(q.num_event_wait_list, q.event_wait_list);
-
-                for (int i = 0; i < q.valid_col_num; i++) {
-                    memcpy(q.ptr_dst[i], q.ptr_src[i], q.meta_nrow * q.tab_col_type_size[i]);
-                }
-
-                q.meta->setColNum(q.valid_col_num);
-                for (int i = 0; i < q.valid_col_num; i++) {
-                    q.meta->setCol(i, i, q.meta_nrow);
-                }
-                q.meta->meta();
-
-                clSetUserEventStatus(q.event[0], CL_COMPLETE);
-                // remove the first element after processing it.
-                q7_ping.pop();
-            }
-        }
-    };
-
-    void aggr_memcpy_in_pong_t() {
-        while (q7_pong_run) {
-#ifdef Valgrind_debug
-            sleep(1);
-#endif
-            while (!q7_pong.empty()) {
-                queue_struct q = q7_pong.front();
-                clWaitForEvents(q.num_event_wait_list, q.event_wait_list);
-
-                for (int i = 0; i < q.valid_col_num; i++) {
-                    memcpy(q.ptr_dst[i], q.ptr_src[i], q.meta_nrow * q.tab_col_type_size[i]);
-                }
-
-                q.meta->setColNum(q.valid_col_num);
-                for (int i = 0; i < q.valid_col_num; i++) {
-                    q.meta->setCol(i, i, q.meta_nrow);
-                }
-                q.meta->meta();
-
-                clSetUserEventStatus(q.event[0], CL_COMPLETE);
-                // remove the first element after processing it.
-                q7_pong.pop();
-            }
-        }
-    };
-
-    void aggr_memcpy_out_ping_t() {
-        while (q8_ping_run) {
-#ifdef Valgrind_debug
-            sleep(1);
-#endif
-            while (!q8_ping.empty()) {
-                queue_struct q = q8_ping.front();
-                clWaitForEvents(q.num_event_wait_list, q.event_wait_list);
-
-                int nrow = q.meta->getColLen();
-                std::cout << "output nrow[" << q.p << "] = " << nrow << std::endl;
-                // in int32 imp, suppose all the col are int32, after aggr, when int64, use the
-                // tab_out.tab_col_type_size
-                for (int c = 0; c < 16; c++) {
-                    if (q.write_flag[c])
-                        memcpy(q.ptr_dst[c] + aggr_sum_nrow * sizeof(int), q.ptr_src[c], nrow * sizeof(int));
-                }
-                aggr_sum_nrow += nrow;
-                std::cout << "output aggr_sum_nrow[" << q.p << "] = " << aggr_sum_nrow << std::endl;
-
-                clSetUserEventStatus(q.event[0], CL_COMPLETE);
-                // remove the first element after processing it.
-                q8_ping.pop();
-            }
-        }
-    }
-
-    void aggr_memcpy_out_pong_t() {
-        while (q8_pong_run) {
-#ifdef Valgrind_debug
-            sleep(1);
-#endif
-            while (!q8_pong.empty()) {
-                queue_struct q = q8_pong.front();
-                clWaitForEvents(q.num_event_wait_list, q.event_wait_list);
-
-                int nrow = q.meta->getColLen();
-                std::cout << "output nrow[" << q.p << "] = " << nrow << std::endl;
-                for (int c = 0; c < 16; c++) {
-                    if (q.write_flag[c])
-                        memcpy(q.ptr_dst[c] + aggr_sum_nrow * sizeof(int), (q.ptr_src[c]), nrow * sizeof(int));
-                }
-                aggr_sum_nrow += nrow;
-                std::cout << "output aggr_sum_nrow[" << q.p << "] = " << aggr_sum_nrow << std::endl;
-
-                clSetUserEventStatus(q.event[0], CL_COMPLETE);
-                // remove the first element after processing it.
-                q8_pong.pop();
-            }
-        }
-    }
-
-    // initialize the table L partition threads
-    void partl_init() {
-        memset(l_new_part_offset, 0, sizeof(int) * 256);
-
-        for (int i = 0; i < 256; i++) {
-            memset(toutrow[i], 0, sizeof(int) * 32);
-        }
-
-        // start the part o memcpy in thread and non-stop running
-        q2_ping_run = 1;
-        part_l_in_ping_t = std::thread(&threading_pool_for_aggr_part::part_l_memcpy_in_ping_t, this);
-
-        // start the part o memcpy in thread and non-stop running
-        q2_pong_run = 1;
-        part_l_in_pong_t = std::thread(&threading_pool_for_aggr_part::part_l_memcpy_in_pong_t, this);
-
-        // start the part o memcpy in thread and non-stop running
-        q3_ping_run = 1;
-        part_l_out_ping_t = std::thread(&threading_pool_for_aggr_part::part_l_memcpy_out_ping_t, this);
-
-        // start the part o memcpy in thread and non-stop running
-        q3_pong_run = 1;
-        part_l_out_pong_t = std::thread(&threading_pool_for_aggr_part::part_l_memcpy_out_pong_t, this);
-    };
-    void aggr_init() {
-        aggr_sum_nrow = 0;
-        // start the part o memcpy in thread and non-stop running
-        q7_ping_run = 1;
-        aggr_in_ping_t = std::thread(&threading_pool_for_aggr_part::aggr_memcpy_in_ping_t, this);
-
-        // start the part o memcpy in thread and non-stop running
-        q7_pong_run = 1;
-        aggr_in_pong_t = std::thread(&threading_pool_for_aggr_part::aggr_memcpy_in_pong_t, this);
-
-        // start the part o memcpy in thread and non-stop running
-        q8_ping_run = 1;
-        aggr_out_ping_t = std::thread(&threading_pool_for_aggr_part::aggr_memcpy_out_ping_t, this);
-
-        // start the part o memcpy in thread and non-stop running
-        q8_pong_run = 1;
-        aggr_out_pong_t = std::thread(&threading_pool_for_aggr_part::aggr_memcpy_out_pong_t, this);
-    }
-};
 
 inline void zipInt64(void* dest, const void* low, const void* high, size_t n) {
     int64_t* dptr = (int64_t*)dest;
@@ -1468,9 +1141,8 @@ inline void zipInt64(void* dest, const void* low, const void* high, size_t n) {
         }
     }
 }
-*/
+
 ErrCode Aggregator::aggr_sol2(Table& tab_in, Table& tab_out, AggrConfig& aggr_cfg, std::vector<size_t> params) {
-/*
     const int VEC_LEN = 16;
     const int size_of_apu512 = sizeof(ap_uint<512>);
     gqe::utils::MM mm;
@@ -1483,22 +1155,10 @@ ErrCode Aggregator::aggr_sol2(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
 #ifdef USER_DEBUG
     std::cout << "tab_in info: " << l_nrow << " rows, " << l_ncol << " cols." << std::endl;
 #endif
-
-    threading_pool_for_aggr_part pool;
-    pool.partl_init();
-
-    // partition kernel
-    cl_kernel partkernel[2];
-    partkernel[0] = clCreateKernel(prg, "gqePart", &err);
-    partkernel[1] = clCreateKernel(prg, "gqePart", &err);
-    cl_kernel aggrkernel[2];
-    aggrkernel[0] = clCreateKernel(prg, "gqeAggr", &err);
-    aggrkernel[1] = clCreateKernel(prg, "gqeAggr", &err);
-
     // ------------------------------------------
     // --------- partitioning Table L ----------
     // partition setups
-    const int k_depth = 512;
+    int k_depth = 512;
     const int partition_num = 1 << log_partition_num;
 
     // divide table L into many sections
@@ -1527,30 +1187,27 @@ ErrCode Aggregator::aggr_sol2(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
     // todo: change config
     std::vector<int8_t> scan_list = aggr_cfg.getScanList();
     std::vector<int8_t> part_list = aggr_cfg.getPartList();
-    char* tab_part_in_user_col_sec[8][tab_part_sec_num];
-    for (int i = 0; i < 8; i++) {
-        if (i < l_ncol) {
-            for (int j = 0; j < tab_part_sec_num; j++) {
-                tab_part_in_user_col_sec[i][j] = tab_in.getColPointer(i, tab_part_sec_num, j);
-            }
-        } else {
-            for (int j = 0; j < tab_part_sec_num; j++) {
-                tab_part_in_user_col_sec[i][j] = mm.aligned_alloc<char>(VEC_LEN);
-            }
-        }
-    }
 
-    char* tab_part_in_col[8][2];
+    char* tab_part_in_col[8][tab_part_sec_num];
     for (int i = 0; i < 8; i++) {
-        if (i < l_ncol) {
-            tab_part_in_col[i][0] = mm.aligned_alloc<char>(tab_part_sec_size[i]);
-            tab_part_in_col[i][1] = mm.aligned_alloc<char>(tab_part_sec_size[i]);
-            memset(tab_part_in_col[i][0], 0, tab_part_sec_size[i]);
-            memset(tab_part_in_col[i][1], 0, tab_part_sec_size[i]);
-        } else {
-            tab_part_in_col[i][0] = mm.aligned_alloc<char>(VEC_LEN);
-            tab_part_in_col[i][1] = mm.aligned_alloc<char>(VEC_LEN);
-        }
+		for (int j = 0; j < tab_part_sec_num; j++) {
+			if (i < l_ncol) {
+				tab_part_in_col[i][j] = (char*) cube_alloc(tab_part_sec_size[i]);
+				if(!tab_part_in_col[i][j]){
+					std::cout<< "Error at alloc" << std::endl;
+					exit(1);
+				}
+
+				memcpy(tab_part_in_col[i][j], tab_in.getColPointer(i, tab_part_sec_num, j), tab_part_sec_nrow[j] * tab_in_col_size[i]);
+	        } else {
+				tab_part_in_col[i][j] = (char*) cube_alloc(VEC_LEN);
+				if(!tab_part_in_col[i][j]){
+					std::cout<< "Error at alloc" << std::endl;
+					exit(1);
+				}
+
+	        }
+		}
     }
 
     // partition output data
@@ -1558,38 +1215,39 @@ ErrCode Aggregator::aggr_sol2(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
     assert(tab_part_out_col_nrow_512_init > 0 && "Error: table output col size must be greater than 0");
     // the depth of each partition in each col
     int tab_part_out_col_eachpart_nrow_512 = (tab_part_out_col_nrow_512_init + partition_num - 1) / partition_num;
-    pool.l_partition_out_col_part_nrow_max = tab_part_out_col_eachpart_nrow_512 * 16;
+    int l_partition_out_col_part_nrow_max = tab_part_out_col_eachpart_nrow_512 * 16;
     // update depth to make sure the buffer size is aligned by parttion_num * tab_part_out_col_eachpart_nrow_512
     int tab_part_out_col_nrow_512 = partition_num * tab_part_out_col_eachpart_nrow_512;
     int tab_part_out_col_size = tab_part_out_col_nrow_512 * size_of_apu512;
 
-    // partition_output data
-    char* tab_part_out_col[8][2];
-    for (int i = 0; i < 8; i++) {
-        if (i < l_ncol) {
-            tab_part_out_col[i][0] = mm.aligned_alloc<char>(tab_part_out_col_size);
-            tab_part_out_col[i][1] = mm.aligned_alloc<char>(tab_part_out_col_size);
-        } else {
-            tab_part_out_col[i][0] = mm.aligned_alloc<char>(VEC_LEN);
-            tab_part_out_col[i][1] = mm.aligned_alloc<char>(VEC_LEN);
-        }
-    }
+	char* tab_part_out_col[8][tab_part_sec_num];
+	for (int i = 0; i < 8; i++) {
+		for (int j = 0; j < tab_part_sec_num; j++) {
+			if (i < l_ncol) {
+				tab_part_out_col[i][j] = (char*) cube_alloc(tab_part_out_col_size);
+				if(!tab_part_out_col[i][j]){
+					std::cout<< "Error at alloc" << std::endl;
+					exit(1);
+				}
+
+			} else {
+				tab_part_out_col[i][j] = (char*) cube_alloc(VEC_LEN);
+				if(!tab_part_out_col[i][j]){
+                                        std::cout<< "Error at alloc" << std::endl;
+                                        exit(1);
+                                }
+			}
+		}
+	}
 
     ap_uint<512>* cfg_part = aggr_cfg.getPartConfigBits();
 
     //--------------- metabuffer setup L -----------------
-    MetaTable meta_part_in[2];
-    for (int k = 0; k < 2; k++) {
-        meta_part_in[k].setColNum(l_ncol);
-        for (int j = 0; j < l_ncol; j++) {
-            meta_part_in[k].setCol(j, j, tab_part_sec_nrow_each);
-        }
-        meta_part_in[k].meta();
-    }
+    MetaTable meta_part_in[tab_part_sec_num];
 
     // setup partition kernel used meta output
-    MetaTable meta_part_out[2];
-    for (int k = 0; k < 2; k++) {
+    MetaTable meta_part_out[tab_part_sec_num];
+    for (int k = 0; k < tab_part_sec_num; k++) {
         meta_part_out[k].setColNum(l_ncol);
         meta_part_out[k].setPartition(partition_num, tab_part_out_col_eachpart_nrow_512);
         for (int j = 0; j < l_ncol; j++) {
@@ -1597,290 +1255,107 @@ ErrCode Aggregator::aggr_sol2(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
         }
         meta_part_out[k].meta();
     }
-    cl_mem_ext_ptr_t mext_tab_part_in_col[8][2];
-    cl_mem_ext_ptr_t mext_meta_part_in[2], mext_meta_part_out[2];
-    cl_mem_ext_ptr_t mext_tab_part_out_col[8][2];
 
-    int part_i = 3;
-    for (int i = 0; i < 8; ++i) {
-        mext_tab_part_in_col[i][0] = {part_i, tab_part_in_col[i][0], partkernel[0]};
-        mext_tab_part_in_col[i][1] = {part_i++, tab_part_in_col[i][1], partkernel[1]};
-    }
 
-    mext_meta_part_in[0] = {part_i, meta_part_in[0].meta(), partkernel[0]};
-    mext_meta_part_in[1] = {part_i++, meta_part_in[1].meta(), partkernel[1]};
-    mext_meta_part_out[0] = {part_i, meta_part_out[0].meta(), partkernel[0]};
-    mext_meta_part_out[1] = {part_i++, meta_part_out[1].meta(), partkernel[1]};
-
-    for (int i = 0; i < 8; ++i) {
-        mext_tab_part_out_col[i][0] = {part_i, tab_part_out_col[i][0], partkernel[0]};
-        mext_tab_part_out_col[i][1] = {part_i++, tab_part_out_col[i][1], partkernel[1]};
-    }
-    cl_mem_ext_ptr_t mext_cfg_part = {part_i++, cfg_part, partkernel[0]};
-
-    // dev buffers, part in
-    cl_mem buf_tab_part_in_col[8][2];
-    for (int k = 0; k < 2; k++) {
-        for (int c = 0; c < 8; c++) {
-            if (c < l_ncol) {
-                buf_tab_part_in_col[c][k] =
-                    clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                   tab_part_sec_size[c], &mext_tab_part_in_col[c][k], &err);
-            } else {
-                buf_tab_part_in_col[c][k] =
-                    clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY, VEC_LEN,
-                                   &mext_tab_part_in_col[c][k], &err);
-            }
-        }
-    }
-
-    // dev buffers, part out
-    cl_mem buf_tab_part_out_col[8][2];
-    for (int k = 0; k < 2; k++) {
-        for (int c = 0; c < 8; c++) {
-            if (c < l_ncol) {
-                buf_tab_part_out_col[c][k] =
-                    clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_WRITE,
-                                   tab_part_out_col_size, &mext_tab_part_out_col[c][k], &err);
-            } else {
-                buf_tab_part_out_col[c][k] =
-                    clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_WRITE, VEC_LEN,
-                                   &mext_tab_part_out_col[c][k], &err);
-            }
-        }
-    }
-
-    cl_mem buf_cfg_part = clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                         (sizeof(ap_uint<512>) * 9), &mext_cfg_part, &err);
-
-    cl_mem buf_meta_part_in[2];
-    buf_meta_part_in[0] = clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                         (sizeof(ap_uint<512>) * 8), &mext_meta_part_in[0], &err);
-    buf_meta_part_in[1] = clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                         (sizeof(ap_uint<512>) * 8), &mext_meta_part_in[1], &err);
-
-    cl_mem buf_meta_part_out[2];
-    buf_meta_part_out[0] = clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_WRITE,
-                                          (sizeof(ap_uint<512>) * 24), &mext_meta_part_out[0], &err);
-    buf_meta_part_out[1] = clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_WRITE,
-                                          (sizeof(ap_uint<512>) * 24), &mext_meta_part_out[1], &err);
+	// combine sec0_partition0, sec1_parttion0, ...secN_partition0 in 1 buffer. the depth is
+    // int l_new_part_nrow_512 = tab_part_out_col_eachpart_nrow_512 * tab_part_sec_num;
+    int l_new_part_nrow_512_size = tab_part_out_col_eachpart_nrow_512 * tab_part_sec_num * size_of_apu512;
 
     // create user partition res cols
     // all sections partition 0 output to same 8-col buffers
     // ap_uint<512> tab_part_new_col[partition_num][8][l_new_part_nrow_512]
-    char*** tab_part_new_col = new char**[partition_num];
-
-    // combine sec0_partition0, sec1_parttion0, ...secN_partition0 in 1 buffer. the depth is
-    // int l_new_part_nrow_512 = tab_part_out_col_eachpart_nrow_512 * tab_part_sec_num;
-    int l_new_part_nrow_512_size = tab_part_out_col_eachpart_nrow_512 * tab_part_sec_num * size_of_apu512;
-
+    char* tab_part_new_col[partition_num][8];
     for (int p = 0; p < partition_num; ++p) {
-        tab_part_new_col[p] = new char*[8];
         for (int i = 0; i < 8; ++i) {
-            tab_part_new_col[p][i] = mm.aligned_alloc<char>(l_new_part_nrow_512_size);
-            memset(tab_part_new_col[p][i], 0, l_new_part_nrow_512_size);
+            tab_part_new_col[p][i] = (char*) cube_alloc(l_new_part_nrow_512_size);
+	    if(!tab_part_new_col[p][i]){
+                std::cout<< "Error at alloc" << std::endl;
+                exit(1);
+    	    }
         }
     }
-
-    //----------------------partition L run-----------------------------
-    std::cout << "------------------- Partitioning L table -----------------" << std::endl;
-    const int idx = 0;
-    int j = 0;
-    for (int k = 0; k < 2; k++) {
-        j = 0;
-        clSetKernelArg(partkernel[k], j++, sizeof(int), &k_depth);
-        clSetKernelArg(partkernel[k], j++, sizeof(int), &idx);
-        clSetKernelArg(partkernel[k], j++, sizeof(int), &log_partition_num);
-        for (int vv = 0; vv < l_ncol; vv++) {
-            clSetKernelArg(partkernel[k], j++, sizeof(cl_mem), &buf_tab_part_in_col[part_list[vv]][k]);
-            // clSetKernelArg(partkernel[k], j++, sizeof(cl_mem), &buf_tab_part_in_col[vv][k]);
-        }
-        for (int vv = l_ncol; vv < 8; vv++) {
-            clSetKernelArg(partkernel[k], j++, sizeof(cl_mem), &buf_tab_part_in_col[vv][k]);
-        }
-        clSetKernelArg(partkernel[k], j++, sizeof(cl_mem), &buf_meta_part_in[k]);
-        clSetKernelArg(partkernel[k], j++, sizeof(cl_mem), &buf_meta_part_out[k]);
-        for (int vv = 0; vv < l_ncol; vv++) {
-            clSetKernelArg(partkernel[k], j++, sizeof(cl_mem), &buf_tab_part_out_col[part_list[vv]][k]);
-            // clSetKernelArg(partkernel[k], j++, sizeof(cl_mem), &buf_tab_part_in_col[vv]][k]);
-        }
-        for (int vv = l_ncol; vv < 8; vv++) {
-            clSetKernelArg(partkernel[k], j++, sizeof(cl_mem), &buf_tab_part_out_col[vv][k]);
-        }
-        clSetKernelArg(partkernel[k], j++, sizeof(cl_mem), &buf_cfg_part);
-    }
-
-    // partition h2d
-    std::vector<cl_mem> part_in_vec[2];
-    for (int k = 0; k < 2; k++) {
-        for (int j = 0; j < l_ncol; j++) {
-            part_in_vec[k].push_back(buf_tab_part_in_col[j][k]);
-        }
-        part_in_vec[k].push_back(buf_meta_part_in[k]);
-        part_in_vec[k].push_back(buf_cfg_part);
-    }
-
-    // partition d2h
-    std::vector<cl_mem> part_out_vec[2];
-    for (int k = 0; k < 2; k++) {
-        for (int j = 0; j < l_ncol; j++) {
-            part_out_vec[k].push_back(buf_tab_part_out_col[j][k]);
-        }
-        part_out_vec[k].push_back(buf_meta_part_out[k]);
-    }
-    clEnqueueMigrateMemObjects(cq, 1, &buf_meta_part_out[0], 0, 0, nullptr, nullptr);
-    clEnqueueMigrateMemObjects(cq, 1, &buf_meta_part_out[1], 0, 0, nullptr, nullptr);
-
-    clEnqueueMigrateMemObjects(cq, part_in_vec[0].size(), part_in_vec[0].data(),
-                               CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, nullptr, nullptr);
-    clEnqueueMigrateMemObjects(cq, part_in_vec[1].size(), part_in_vec[1].data(),
-                               CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, nullptr, nullptr);
-    clEnqueueMigrateMemObjects(cq, part_out_vec[0].size(), part_out_vec[0].data(),
-                               CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, nullptr, nullptr);
-    clEnqueueMigrateMemObjects(cq, part_out_vec[1].size(), part_out_vec[1].data(),
-                               CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, nullptr, nullptr);
-
-    std::vector<std::vector<cl_event> > evt_part_h2d(tab_part_sec_num);
-    std::vector<std::vector<cl_event> > evt_part_krn(tab_part_sec_num);
-    std::vector<std::vector<cl_event> > evt_part_d2h(tab_part_sec_num);
-
-    for (int sec = 0; sec < tab_part_sec_num; sec++) {
-        evt_part_h2d[sec].resize(1);
-        evt_part_krn[sec].resize(1);
-        evt_part_d2h[sec].resize(1);
-    }
-
-    std::vector<std::vector<cl_event> > evt_part_h2d_dep(tab_part_sec_num);
-    evt_part_h2d_dep[0].resize(1);
-    for (int i = 1; i < tab_part_sec_num; ++i) {
-        if (i == 1)
-            evt_part_h2d_dep[i].resize(1);
-        else
-            evt_part_h2d_dep[i].resize(2);
-    }
-    std::vector<std::vector<cl_event> > evt_part_krn_dep(tab_part_sec_num);
-    evt_part_krn_dep[0].resize(1);
-    for (int i = 1; i < tab_part_sec_num; ++i) {
-        if (i == 1)
-            evt_part_krn_dep[i].resize(2);
-        else
-            evt_part_krn_dep[i].resize(3);
-    }
-    std::vector<std::vector<cl_event> > evt_part_d2h_dep(tab_part_sec_num);
-    evt_part_d2h_dep[0].resize(1);
-    for (int i = 1; i < tab_part_sec_num; ++i) {
-        if (i == 1)
-            evt_part_d2h_dep[i].resize(1);
-        else
-            evt_part_d2h_dep[i].resize(2);
-    }
-
-    // define partl memcpy in user events
-    std::vector<std::vector<cl_event> > evt_part_memcpy_in(tab_part_sec_num);
-    for (int i = 0; i < tab_part_sec_num; i++) {
-        evt_part_memcpy_in[i].resize(1);
-        evt_part_memcpy_in[i][0] = clCreateUserEvent(ctx, &err);
-    }
-    std::vector<std::vector<cl_event> > evt_part_memcpy_out(tab_part_sec_num);
-    for (int i = 0; i < tab_part_sec_num; i++) {
-        evt_part_memcpy_out[i].resize(1);
-        evt_part_memcpy_out[i][0] = clCreateUserEvent(ctx, &err);
-    }
-
-    queue_struct part_min[tab_part_sec_num];
-    queue_struct part_mout[tab_part_sec_num];
 
     std::cout << "=================" << std::endl;
 
-    gqe::utils::Timer timer_part;
-    timer_part.add();
+        std::atomic<int> l_new_part_offset[256];
+        memset(l_new_part_offset, 0, sizeof(int) * 256);
+
+	session part_response[tab_part_sec_num];
+	request part_request[tab_part_sec_num];
+	int idx = 0;
     for (int sec = 0; sec < tab_part_sec_num; sec++) {
-        int kid = sec % 2;
-        // 1) memcpy in
-        part_min[sec].sec = sec;
-        part_min[sec].valid_col_num = l_ncol;
-        part_min[sec].tab_col_type_size = tab_in_col_size;
-        part_min[sec].event = &evt_part_memcpy_in[sec][0];
-        part_min[sec].meta_nrow = tab_part_sec_nrow[sec];
-        part_min[sec].meta = &meta_part_in[kid];
+		meta_part_in[sec].setColNum(l_ncol);
         for (int i = 0; i < l_ncol; i++) {
-            part_min[sec].ptr_src[i] = tab_part_in_user_col_sec[i][sec];
-            part_min[sec].ptr_dst[i] = tab_part_in_col[i][kid];
+            meta_part_in[sec].setCol(i, i, tab_part_sec_nrow[sec]);
         }
-        if (sec > 1) {
-            part_min[sec].num_event_wait_list = evt_part_h2d[sec - 2].size();
-            part_min[sec].event_wait_list = evt_part_h2d[sec - 2].data();
-        } else {
-            part_min[sec].num_event_wait_list = 0;
-            part_min[sec].event_wait_list = nullptr;
-        }
-        if (kid == 0) pool.q2_ping.push(part_min[sec]);
-        if (kid == 1) pool.q2_pong.push(part_min[sec]);
-        // 2) h2d
-        evt_part_h2d_dep[sec][0] = evt_part_memcpy_in[sec][0];
-        if (sec > 1) {
-            evt_part_h2d_dep[sec][1] = evt_part_krn[sec - 2][0];
-        }
-        clEnqueueMigrateMemObjects(cq, part_in_vec[kid].size(), part_in_vec[kid].data(), 0,
-                                   evt_part_h2d_dep[sec].size(), evt_part_h2d_dep[sec].data(), &evt_part_h2d[sec][0]);
 
-        // 3) kernel
-        evt_part_krn_dep[sec][0] = evt_part_h2d[sec][0];
-        if (sec > 0) {
-            evt_part_krn_dep[sec][1] = evt_part_krn[sec - 1][0];
-        }
-        if (sec > 1) {
-            evt_part_krn_dep[sec][2] = evt_part_d2h[sec - 2][0];
-        }
-        clEnqueueTask(cq, partkernel[kid], evt_part_krn_dep[sec].size(), evt_part_krn_dep[sec].data(),
-                      &evt_part_krn[sec][0]);
+        // run kernel
+		part_request[sec] = request_create("com.xilinx.vitis.database.gqePart");
+		int j = 0;
+		request_arg(part_request[sec], j++, sizeof(int), &k_depth);
+		request_arg(part_request[sec], j++, sizeof(int), &idx);
+		request_arg(part_request[sec], j++, sizeof(int), &log_partition_num);
 
-        // 4) d2h, transfer partiton results back
-        evt_part_d2h_dep[sec][0] = evt_part_krn[sec][0];
-        if (sec > 1) {
-            evt_part_d2h_dep[sec][1] = evt_part_memcpy_out[sec - 2][0];
+        for (int vv = 0; vv < l_ncol; vv++) {
+            request_arg(part_request[sec], j++, 0, tab_part_in_col[part_list[vv]][sec]);
         }
-        clEnqueueMigrateMemObjects(cq, part_out_vec[kid].size(), part_out_vec[kid].data(), 1,
-                                   evt_part_d2h_dep[sec].size(), evt_part_d2h_dep[sec].data(), &evt_part_d2h[sec][0]);
+        for (int vv = l_ncol; vv < 8; vv++) {
+            request_arg(part_request[sec], j++, 0, tab_part_in_col[vv][sec]);
+        }
+        request_arg(part_request[sec], j++, 0, meta_part_in[sec].meta()); // size 24*sizeof(ap_uint<512>) with cube_alloc
+		request_arg(part_request[sec], j++, 0, meta_part_out[sec].meta()); // size 24*sizeof(ap_uint<512>) with cube_alloc
+        for (int vv = 0; vv < l_ncol; vv++) {
+            request_arg(part_request[sec], j++, 0, tab_part_out_col[part_list[vv]][sec]);
+        }
+        for (int vv = l_ncol; vv < 8; vv++) {
+            request_arg(part_request[sec], j++, 0, tab_part_out_col[vv][sec]);
+        }
+        request_arg(part_request[sec], j++, 0, cfg_part);
 
-        // 5) memcpy out
-        part_mout[sec].sec = sec;
-        part_mout[sec].valid_col_num = l_ncol;
-        part_mout[sec].tab_col_type_size = tab_in_col_size;
-        part_mout[sec].partition_num = partition_num;
-        part_mout[sec].part_max_nrow_512 = tab_part_out_col_eachpart_nrow_512;
-        part_mout[sec].event = &evt_part_memcpy_out[sec][0];
-        part_mout[sec].meta = &meta_part_out[kid];
-        for (int i = 0; i < l_ncol; i++) {
-            part_mout[sec].ptr_src[i] = tab_part_out_col[i][kid];
-        }
-        part_mout[sec].part_ptr_dst = tab_part_new_col;
-        part_mout[sec].num_event_wait_list = evt_part_d2h[sec].size();
-        part_mout[sec].event_wait_list = evt_part_d2h[sec].data();
-        if (kid == 0) pool.q3_ping.push(part_mout[sec]);
-        if (kid == 1) pool.q3_pong.push(part_mout[sec]);
+		part_response[sec] = inaccel_submit(part_request[sec]);
+		if(!part_response[sec]){
+			printf("Error at submit\n");
+			exit(1);
+		}
+	}
+
+	for (int sec = 0; sec < tab_part_sec_num; sec++) {
+		if(inaccel_wait(part_response[sec])){
+			std::cout << "Error at Part wait " << sec << std::endl;
+			exit(1);
+		}
+        // memcpy out
+		int l_partition_out_col_part_depth = tab_part_out_col_eachpart_nrow_512;
+		int* nrow_per_part_l = meta_part_out[sec].getPartLen();
+
+		for (int p = 0; p < partition_num; ++p) {
+			int sec_partitioned_res_part_nrow = nrow_per_part_l[p];
+			if (sec_partitioned_res_part_nrow > l_partition_out_col_part_nrow_max) {
+				std::cerr << "partition out nrow: " << sec_partitioned_res_part_nrow
+						  << ", buffer size: " << l_partition_out_col_part_nrow_max << std::endl;
+				std::cerr << "ERROR: Table L output partition size is smaller than required!" << std::endl;
+				exit(1);
+			}
+
+			int offset = l_new_part_offset[p];
+			l_new_part_offset[p] += sec_partitioned_res_part_nrow;
+
+			for (int i = 0; i < l_ncol; i++) {
+				memcpy(tab_part_new_col[p][i] + offset * tab_in_col_size[i],
+					   tab_part_out_col[i][sec] + p * l_partition_out_col_part_depth * sizeof(ap_uint<512>),
+					   tab_in_col_size[i] * sec_partitioned_res_part_nrow);
+			}
+		}
+
+		request_free(part_request[sec]);
+
     }
-    clWaitForEvents(evt_part_memcpy_out[tab_part_sec_num - 1].size(), evt_part_memcpy_out[tab_part_sec_num - 1].data());
-    if (tab_part_sec_num > 1) {
-        clWaitForEvents(evt_part_memcpy_out[tab_part_sec_num - 2].size(),
-                        evt_part_memcpy_out[tab_part_sec_num - 2].data());
-    }
-    timer_part.add();
 
-    pool.q2_ping_run = 0;
-    pool.q2_pong_run = 0;
 
-    pool.q3_ping_run = 0;
-    pool.q3_pong_run = 0;
-
-    pool.part_l_in_ping_t.join();
-    pool.part_l_in_pong_t.join();
-    pool.part_l_out_ping_t.join();
-    pool.part_l_out_pong_t.join();
 #ifdef XDEBUG
     // print new_part column data
     for (int p = 0; p < partition_num; p++) {
-        int part_nrow = pool.l_new_part_offset[p];
+        int part_nrow = l_new_part_offset[p];
         std::cout << "----------------------------------" << std::endl;
         std::cout << "Tab L, p: " << p << ", nrow = " << part_nrow << std::endl;
         for (int c = 0; c < 7; c++) {
@@ -1898,8 +1373,6 @@ ErrCode Aggregator::aggr_sol2(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
 #endif
 
 #ifdef AGGR_PERF_PROFILE
-    cl_ulong start, end;
-    long evt_ns;
     for (int sec = 0; sec < tab_part_sec_num; sec++) {
         double input_memcpy_size = 0;
         for (int i = 0; i < l_ncol; i++) {
@@ -1907,43 +1380,26 @@ ErrCode Aggregator::aggr_sol2(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
         }
         input_memcpy_size = input_memcpy_size / 1024 / 1024;
 
-        clGetEventProfilingInfo(evt_part_h2d[sec][0], CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
-        clGetEventProfilingInfo(evt_part_h2d[sec][0], CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
-        evt_ns = end - start;
         std::cout << "Tab L sec: " << sec << ", h2d, size: " << input_memcpy_size
-                  << " MB, time: " << double(evt_ns) / 1000000
-                  << " ms, throughput: " << input_memcpy_size / 1024 / ((double)evt_ns / 1000000000) << " GB/s "
+                  << " MB"
                   << std::endl;
 
-        clGetEventProfilingInfo(evt_part_krn[sec][0], CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
-        clGetEventProfilingInfo(evt_part_krn[sec][0], CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
-        evt_ns = end - start;
-        std::cout << "Tab L sec: " << sec << ", krn, size: " << input_memcpy_size
-                  << " MB, time: " << double(evt_ns) / 1000000
-                  << " ms, throughput: " << input_memcpy_size / 1024 / ((double)evt_ns / 1000000000) << " GB/s "
-                  << std::endl;
-
-        clGetEventProfilingInfo(evt_part_d2h[sec][0], CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
-        clGetEventProfilingInfo(evt_part_d2h[sec][0], CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
-        evt_ns = end - start;
         double output_memcpy_size = (double)tab_part_out_col_size * l_ncol / 1024 / 1024;
         std::cout << "Tab L sec: " << sec << ", d2h, size: " << output_memcpy_size
-                  << " MB, time: " << double(evt_ns) / 1000000
-                  << " ms, throughput: " << output_memcpy_size / 1024 / ((double)evt_ns / 1000000000) << " GB/s "
+                  << " MB"
                   << std::endl;
     }
 
     for (int p = 0; p < partition_num; ++p) {
-        std::cout << "Tab L, p: " << p << ", nrow = " << pool.l_new_part_offset[p] << std::endl;
+        std::cout << "Tab L, p: " << p << ", nrow = " << l_new_part_offset[p] << std::endl;
     }
 #endif
-    double tvtime_part = timer_part.getMilliSec();
+
 
     //=====================================================
     //==================== group aggr =====================
     //=====================================================
 
-    pool.aggr_init();
     ap_uint<32>* cfg_aggr = aggr_cfg.getAggrConfigBits();
     ap_uint<32>* cfg_aggr_out = aggr_cfg.getAggrConfigOutBits();
     int out_ncol = aggr_cfg.getOutputColNum();
@@ -1969,7 +1425,7 @@ ErrCode Aggregator::aggr_sol2(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
     int aggr_in_nrow_max = 0;
     int aggr_in_nrow[partition_num];
     for (int p = 0; p < partition_num; p++) {
-        aggr_in_nrow[p] = pool.l_new_part_offset[p];
+        aggr_in_nrow[p] = l_new_part_offset[p];
         aggr_in_nrow_max = std::max(aggr_in_nrow_max, aggr_in_nrow[p]);
     }
     std::cout << "aggr_in_nrow_max = " << aggr_in_nrow_max << std::endl;
@@ -1978,13 +1434,20 @@ ErrCode Aggregator::aggr_sol2(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
         aggr_in_nrow_max_size[i] = aggr_in_nrow_max * tab_in_col_size[i];
     }
 
-    char* tab_aggr_in_col[8][2];
-    for (int k = 0; k < 2; k++) {
+    char* tab_aggr_in_col[8][partition_num];
+    for (int k = 0; k < partition_num; k++) {
         for (int c = 0; c < 8; c++) {
-            if (c < l_ncol)
-                tab_aggr_in_col[c][k] = mm.aligned_alloc<char>(aggr_in_nrow_max_size[c]);
-            else
-                tab_aggr_in_col[c][k] = mm.aligned_alloc<char>(VEC_LEN);
+            if (c < l_ncol){
+				tab_aggr_in_col[c][k] = (char*) tab_part_new_col[k][scan_list[c]];
+			}
+            else{
+				tab_aggr_in_col[c][k] = (char*) cube_alloc(VEC_LEN);
+				if(!tab_aggr_in_col[c][k]){
+                                        std::cout<< "Error at alloc" << std::endl;
+                                        exit(1);
+                                }
+
+			}
         }
     }
 
@@ -1993,302 +1456,156 @@ ErrCode Aggregator::aggr_sol2(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
     size_t aggr_result_nrow_512 = (aggr_result_nrow + VEC_LEN - 1) / VEC_LEN;
     size_t aggr_result_nrow_512_size = aggr_result_nrow_512 * sizeof(ap_uint<512>);
     // in int32 imp, suppose all the data bit is 32 bit
-    char* tab_aggr_out_col[16][2];
-    for (int k = 0; k < 2; k++) {
+    char* tab_aggr_out_col[16][partition_num];
+    for (int k = 0; k < partition_num; k++) {
         for (int i = 0; i < 16; i++) {
             if (write_flag[i]) {
-                tab_aggr_out_col[i][k] = mm.aligned_alloc<char>(aggr_result_nrow_512_size);
-                memset(tab_aggr_out_col[i][k], 0, aggr_result_nrow_512_size);
+                tab_aggr_out_col[i][k] = (char*) cube_alloc(aggr_result_nrow_512_size);
+		if(!tab_aggr_out_col[i][k]){
+                	std::cout<< "Error at alloc" << std::endl;
+        	        exit(1);
+		}
+
             } else {
-                tab_aggr_out_col[i][k] = mm.aligned_alloc<char>(VEC_LEN);
+                tab_aggr_out_col[i][k] = (char*) cube_alloc(VEC_LEN);
+		if(!tab_aggr_out_col[i][k]){
+                        std::cout<< "Error at alloc" << std::endl;
+                        exit(1);
+                }
             }
         }
     }
 
-    //--------------- meta setup -----------------
+	//--------------- meta setup -----------------
     // setup meta input and output
-    MetaTable meta_aggr_in[2];
-    MetaTable meta_aggr_out[2];
-    for (int i = 0; i < 2; i++) {
-        meta_aggr_in[i].setColNum(l_ncol);
-        for (int j = 0; j < l_ncol; j++) {
-            // meta_aggr_in[i].setCol(j, j, (aggr_in_nrow_max + 15) / 16);
-            meta_aggr_in[i].setCol(j, j, aggr_in_nrow_max);
-        }
-        meta_aggr_in[i].meta();
-    }
-    meta_aggr_out[0].setColNum(16);
-    meta_aggr_out[1].setColNum(16);
-    for (int c = 0; c < 16; c++) {
-        meta_aggr_out[0].setCol(c, c, aggr_result_nrow_512);
-        meta_aggr_out[1].setCol(c, c, aggr_result_nrow_512);
-    }
-    meta_aggr_out[0].meta();
-    meta_aggr_out[1].meta();
-    // setCol invalid now since kernel code is comment out
-    //---------------------------------------------
+	MetaTable meta_aggr_in[partition_num+1];
+	MetaTable meta_aggr_out[partition_num];
+	for (int i = 0; i < partition_num; i++) {
+		meta_aggr_out[i].setColNum(16);
+		for (int c = 0; c < 16; c++) {
+			meta_aggr_out[i].setCol(c, c, aggr_result_nrow_512);
+		}
+		meta_aggr_out[i].meta();
+	}
 
-    cl_mem_ext_ptr_t mext_tab_aggr_in_col[8][2];
-    cl_mem_ext_ptr_t mext_meta_aggr_in[2], mext_meta_aggr_out[2];
-    cl_mem_ext_ptr_t mext_cfg_aggr, mext_cfg_aggr_out;
-    cl_mem_ext_ptr_t mext_tab_aggr_out[16][2];
-    cl_mem_ext_ptr_t mext_aggr_tmp[8];
 
-    int agg_i = 0;
-    for (int k = 0; k < 2; k++) {
-        agg_i = 0;
-        for (int c = 0; c < 8; c++) {
-            mext_tab_aggr_in_col[c][k] = {agg_i++, tab_aggr_in_col[c][k], aggrkernel[k]};
-        }
-        mext_meta_aggr_in[k] = {agg_i++, meta_aggr_in[k].meta(), aggrkernel[k]};
-        mext_meta_aggr_out[k] = {agg_i++, meta_aggr_out[k].meta(), aggrkernel[k]};
-    }
-
-    for (int k = 0; k < 2; k++) {
-        agg_i = 10;
-        for (int i = 0; i < 16; ++i) {
-            mext_tab_aggr_out[i][k] = {agg_i++, tab_aggr_out_col[i][k], aggrkernel[k]};
-        }
-    }
-
-    mext_cfg_aggr = {agg_i++, cfg_aggr, aggrkernel[0]};
-    mext_cfg_aggr_out = {agg_i++, cfg_aggr_out, aggrkernel[0]};
-
-    for (int c = 0; c < 8; c++) {
-        mext_aggr_tmp[c] = {agg_i++, nullptr, aggrkernel[0]};
-    }
-
-    cl_mem buf_tab_aggr_in_col[8][2];
-    for (int k = 0; k < 2; k++) {
-        for (int i = 0; i < 8; ++i) {
-            if (i < l_ncol) {
-                buf_tab_aggr_in_col[i][k] =
-                    clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                   aggr_in_nrow_max_size[i], &mext_tab_aggr_in_col[i][k], &err);
-            } else {
-                buf_tab_aggr_in_col[i][k] =
-                    clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY, VEC_LEN,
-                                   &mext_tab_aggr_in_col[i][k], &err);
-            }
-        }
-    }
-
-    cl_mem buf_aggr_tmp[8];
-    for (int i = 0; i < 8; i++) {
-        buf_aggr_tmp[i] = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_HOST_NO_ACCESS | CL_MEM_EXT_PTR_XILINX,
-                                         (size_t)(8 * S_BUFF_DEPTH), &mext_aggr_tmp[i], &err);
-    }
-
-    cl_mem buf_meta_aggr_in[2];
-    buf_meta_aggr_in[0] = clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                         (sizeof(ap_uint<512>) * 24), &mext_meta_aggr_in[0], &err);
-    buf_meta_aggr_in[1] = clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                         (sizeof(ap_uint<512>) * 24), &mext_meta_aggr_in[1], &err);
-
-    cl_mem buf_meta_aggr_out[2];
-    buf_meta_aggr_out[0] = clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_WRITE,
-                                          (sizeof(ap_uint<512>) * 24), &mext_meta_aggr_out[0], &err);
-    buf_meta_aggr_out[1] = clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_WRITE,
-                                          (sizeof(ap_uint<512>) * 24), &mext_meta_aggr_out[1], &err);
-
-    cl_mem buf_cfg_aggr = clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                         size_t(4 * 128), &mext_cfg_aggr, &err);
-    cl_mem buf_cfg_aggr_out = clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_WRITE,
-                                             size_t(4 * 128), &mext_cfg_aggr_out, &err);
-    cl_mem buf_tab_aggr_out_col[16][2];
-    for (int k = 0; k < 2; k++) {
-        for (int i = 0; i < 16; ++i) {
-            if (write_flag[i])
-                buf_tab_aggr_out_col[i][k] =
-                    clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_WRITE,
-                                   aggr_result_nrow_512_size, &mext_tab_aggr_out[i][k], &err);
-            else
-                buf_tab_aggr_out_col[i][k] =
-                    clCreateBuffer(ctx, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_WRITE, VEC_LEN,
-                                   &mext_tab_aggr_out[i][k], &err);
-        }
-    }
-
-    // set args and enqueue kernel
-    for (int k = 0; k < 2; k++) {
-        j = 0;
-        clSetKernelArg(aggrkernel[k], j++, sizeof(cl_mem), &buf_tab_aggr_in_col[0][k]);
-        clSetKernelArg(aggrkernel[k], j++, sizeof(cl_mem), &buf_tab_aggr_in_col[1][k]);
-        clSetKernelArg(aggrkernel[k], j++, sizeof(cl_mem), &buf_tab_aggr_in_col[2][k]);
-        clSetKernelArg(aggrkernel[k], j++, sizeof(cl_mem), &buf_tab_aggr_in_col[3][k]);
-        clSetKernelArg(aggrkernel[k], j++, sizeof(cl_mem), &buf_tab_aggr_in_col[4][k]);
-        clSetKernelArg(aggrkernel[k], j++, sizeof(cl_mem), &buf_tab_aggr_in_col[5][k]);
-        clSetKernelArg(aggrkernel[k], j++, sizeof(cl_mem), &buf_tab_aggr_in_col[6][k]);
-        clSetKernelArg(aggrkernel[k], j++, sizeof(cl_mem), &buf_tab_aggr_in_col[7][k]);
-        clSetKernelArg(aggrkernel[k], j++, sizeof(cl_mem), &buf_meta_aggr_in[k]);
-        clSetKernelArg(aggrkernel[k], j++, sizeof(cl_mem), &buf_meta_aggr_out[k]);
-        for (int c = 0; c < 16; c++) {
-            clSetKernelArg(aggrkernel[k], j++, sizeof(cl_mem), &buf_tab_aggr_out_col[c][k]);
-        }
-        clSetKernelArg(aggrkernel[k], j++, sizeof(cl_mem), &buf_cfg_aggr);
-        clSetKernelArg(aggrkernel[k], j++, sizeof(cl_mem), &buf_cfg_aggr_out);
-        for (int c = 0; c < 8; c++) {
-            clSetKernelArg(aggrkernel[k], j++, sizeof(cl_mem), &buf_aggr_tmp[c]);
-        }
-    }
-
-    clEnqueueMigrateMemObjects(cq, 1, &buf_meta_aggr_out[0], 0, 0, nullptr, nullptr);
-    clEnqueueMigrateMemObjects(cq, 1, &buf_meta_aggr_out[1], 0, 0, nullptr, nullptr);
-
-    std::vector<cl_mem> aggr_in_vec[2];
-    for (int k = 0; k < 2; k++) {
-        for (int i = 0; i < l_ncol; i++) {
-            aggr_in_vec[k].push_back(buf_tab_aggr_in_col[i][k]);
-        }
-        aggr_in_vec[k].push_back(buf_meta_aggr_in[k]);
-        aggr_in_vec[k].push_back(buf_cfg_aggr);
-    }
-
-    std::vector<cl_mem> aggr_out_vec[2];
-    for (int k = 0; k < 2; k++) {
-        for (int i = 0; i < 16; ++i) {
-            aggr_out_vec[k].push_back(buf_tab_aggr_out_col[i][k]);
-        }
-        aggr_out_vec[k].push_back(buf_meta_aggr_out[k]);
-    }
-    clEnqueueMigrateMemObjects(cq, aggr_in_vec[0].size(), aggr_in_vec[0].data(),
-                               CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, nullptr, nullptr);
-    clEnqueueMigrateMemObjects(cq, aggr_in_vec[1].size(), aggr_in_vec[1].data(),
-                               CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, nullptr, nullptr);
-    clEnqueueMigrateMemObjects(cq, aggr_out_vec[0].size(), aggr_out_vec[0].data(),
-                               CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, nullptr, nullptr);
-    clEnqueueMigrateMemObjects(cq, aggr_out_vec[1].size(), aggr_out_vec[1].data(),
-                               CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED, 0, nullptr, nullptr);
-
-    std::vector<std::vector<cl_event> > evt_aggr_memcpy_in(partition_num);
-    std::vector<std::vector<cl_event> > evt_aggr_h2d(partition_num);
-    std::vector<std::vector<cl_event> > evt_aggr_krn(partition_num);
-    std::vector<std::vector<cl_event> > evt_aggr_d2h(partition_num);
-    std::vector<std::vector<cl_event> > evt_aggr_memcpy_out(partition_num);
-    for (int p = 0; p < partition_num; p++) {
-        evt_aggr_memcpy_in[p].resize(1);
-        evt_aggr_h2d[p].resize(1);
-        evt_aggr_krn[p].resize(1);
-        evt_aggr_d2h[p].resize(1);
-        evt_aggr_memcpy_out[p].resize(1);
-
-        evt_aggr_memcpy_in[p][0] = clCreateUserEvent(ctx, &err);
-        evt_aggr_memcpy_out[p][0] = clCreateUserEvent(ctx, &err);
-    }
-
-    std::vector<std::vector<cl_event> > evt_aggr_h2d_dep(partition_num);
-    evt_aggr_h2d_dep[0].resize(1);
-    for (int i = 1; i < partition_num; ++i) {
-        if (i == 1)
-            evt_aggr_h2d_dep[i].resize(1);
-        else
-            evt_aggr_h2d_dep[i].resize(2);
-    }
-    std::vector<std::vector<cl_event> > evt_aggr_krn_dep(partition_num);
-    std::vector<std::vector<cl_event> > evt_aggr_d2h_dep(partition_num);
 
     // the collection of each partition aggr results
     // in int32 imp, suppose all the data bit is 32 bit
     char* tab_aggr_res_col[16];
     for (int i = 0; i < 16; i++) {
-        void* ptr = nullptr;
-        if (posix_memalign(&ptr, 4096, aggr_result_nrow_512_size)) throw std::bad_alloc();
-        tab_aggr_res_col[i] = reinterpret_cast<char*>(ptr);
+		void* ptr = nullptr;
+		if (posix_memalign(&ptr, 4096, aggr_result_nrow_512_size)) throw std::bad_alloc();
+		tab_aggr_res_col[i] = reinterpret_cast<char*>(ptr);
     }
-
-    queue_struct aggr_min[partition_num];
-    queue_struct aggr_mout[partition_num];
 
     // because pure device buf is used in aggr kernel, the kernel needs to be run invalid for 1 round
     {
         std::cout << "xxxxxxxxxxxxxxxxxxxxxx invalid below xxxxxxxxxxxxxxxxxxxxxxxx" << std::endl;
-        meta_aggr_in[0].setColNum(1);
-        meta_aggr_in[0].setCol(0, 0, 15);
-        meta_aggr_in[0].meta();
-        clEnqueueMigrateMemObjects(cq, aggr_in_vec[0].size(), aggr_in_vec[0].data(), 0, 0, nullptr,
-                                   &evt_aggr_h2d[0][0]);
+		char* tmp_in_col[8];
+		for(int i = 0; i < l_ncol; i++){
+			tmp_in_col[i] = (char*) cube_alloc(aggr_in_nrow_max_size[i]);
+			if(!tmp_in_col[i]){
+				std::cout<< "Error at alloc" << std::endl;
+				exit(1);
+			}
 
-        clEnqueueTask(cq, aggrkernel[0], evt_aggr_h2d[0].size(), evt_aggr_h2d[0].data(), nullptr);
-        clFinish(cq);
+		}
+		for( int i = l_ncol; i < 8; i++){
+			tmp_in_col[i] = (char*) cube_alloc(VEC_LEN);
+			if(!tmp_in_col[i]){
+                                std::cout<< "Error at alloc" << std::endl;
+                                exit(1);
+                        }
+
+		}
+        meta_aggr_in[partition_num].setColNum(1);
+        meta_aggr_in[partition_num].setCol(0, 0, 15);
+	meta_aggr_in[partition_num].meta();
+		request request = request_create("com.xilinx.vitis.database.gqeAggr");
+		int j = 0;
+		for(int i = 0; i < l_ncol; i++){
+				request_arg(request, j++, 0, tmp_in_col[i]);
+		}
+		for( int i = l_ncol; i < 8; i++){
+			request_arg(request, j++, 0, tmp_in_col[i]);
+		}
+		request_arg(request, j++, 0, meta_aggr_in[partition_num].meta());
+		request_arg(request, j++, 0, meta_aggr_out[0].meta());
+		for( int i = 0; i < 16; i++){
+			request_arg(request, j++, 0, tab_aggr_out_col[i][0]);
+		}
+		request_arg(request, j++, 0, cfg_aggr);
+		request_arg(request, j++, 0, cfg_aggr_out);
+
+		session response = inaccel_submit(request);
+		if(!response){
+			printf("Error at submit\n");
+			exit(1);
+		}
+		if(inaccel_wait(response)){
+			std::cout << "Error at Aggr wait" << std::endl;
+			exit(1);
+		}
+		request_free(request);
         std::cout << "xxxxxxxxxxxxxxxxxxxxxx invalid above xxxxxxxxxxxxxxxxxxxxxxxx" << std::endl;
     }
-    gqe::utils::Timer timer_aggr;
-    timer_aggr.add();
+
+	// the total aggr num
+	std::atomic<int64_t> aggr_sum_nrow;
+	aggr_sum_nrow = 0;
+	session aggr_response[partition_num];
+	request aggr_request[partition_num];
     // aggr loop run
     for (int p = 0; p < partition_num; p++) {
-        int kid = p % 2;
-        // 1)memcpy in, copy the data from tab_part_new_col[partition_num][8][l_new_part_nrow_512] to
-        // tab_aggr_in_col0-7
-        aggr_min[p].p = p;
-        aggr_min[p].valid_col_num = l_ncol;
-        aggr_min[p].tab_col_type_size = tab_in_col_size;
-        aggr_min[p].event = &evt_aggr_memcpy_in[p][0];
-        aggr_min[p].meta = &meta_aggr_in[kid];
-        aggr_min[p].meta_nrow = aggr_in_nrow[p];
+	meta_aggr_in[p].setColNum(l_ncol);
         for (int i = 0; i < l_ncol; i++) {
-            aggr_min[p].ptr_src[i] = tab_part_new_col[p][scan_list[i]];
-            aggr_min[p].ptr_dst[i] = tab_aggr_in_col[i][kid];
+            meta_aggr_in[p].setCol(i, i, aggr_in_nrow[p]);
         }
-        if (p > 1) {
-            aggr_min[p].num_event_wait_list = evt_aggr_h2d[p - 2].size();
-            aggr_min[p].event_wait_list = evt_aggr_h2d[p - 2].data();
-        } else {
-            aggr_min[p].num_event_wait_list = 0;
-            aggr_min[p].event_wait_list = nullptr;
-        }
-        if (kid == 0) pool.q7_ping.push(aggr_min[p]);
-        if (kid == 1) pool.q7_pong.push(aggr_min[p]);
-        // 2)h2d
-        evt_aggr_h2d_dep[p][0] = evt_aggr_memcpy_in[p][0];
-        if (p > 1) {
-            evt_aggr_h2d_dep[p][1] = evt_aggr_krn[p - 2][0];
-        }
-        clEnqueueMigrateMemObjects(cq, aggr_in_vec[kid].size(), aggr_in_vec[kid].data(), 0, evt_aggr_h2d_dep[p].size(),
-                                   evt_aggr_h2d_dep[p].data(), &evt_aggr_h2d[p][0]);
-        // 3)aggr kernel
-        evt_aggr_krn_dep[p].push_back(evt_aggr_h2d[p][0]);
-        if (p > 0) {
-            evt_aggr_krn_dep[p].push_back(evt_aggr_krn[p - 1][0]);
-        }
-        if (p > 1) {
-            evt_aggr_krn_dep[p].push_back(evt_aggr_d2h[p - 2][0]);
-        }
-        clEnqueueTask(cq, aggrkernel[kid], evt_aggr_krn_dep[p].size(), evt_aggr_krn_dep[p].data(), &evt_aggr_krn[p][0]);
-        // 4)d2h
-        evt_aggr_d2h_dep[p].push_back(evt_aggr_krn[p][0]);
-        if (p > 1) {
-            evt_aggr_d2h_dep[p].push_back(evt_aggr_memcpy_out[p - 2][0]);
-        }
-        clEnqueueMigrateMemObjects(cq, aggr_out_vec[kid].size(), aggr_out_vec[kid].data(), CL_MIGRATE_MEM_OBJECT_HOST,
-                                   evt_aggr_d2h_dep[p].size(), evt_aggr_d2h_dep[p].data(), &evt_aggr_d2h[p][0]);
+        // run kernel
+		aggr_request[p] = request_create("com.xilinx.vitis.database.gqeAggr");
+		int j = 0;
+		for(int i = 0; i < l_ncol; i++){
+			request_arg(aggr_request[p], j++, 0, tab_aggr_in_col[i][p]);
+		}
+		for(int i = l_ncol; i < 8; i++){
+			request_arg(aggr_request[p], j++, 0, tab_aggr_in_col[i][p]);
+		}
+		request_arg(aggr_request[p], j++, 0, meta_aggr_in[p].meta());
+		request_arg(aggr_request[p], j++, 0, meta_aggr_out[p].meta());
+		for( int i = 0; i < 16; i++){
+			request_arg(aggr_request[p], j++, 0, tab_aggr_out_col[i][p]);
+		}
+		request_arg(aggr_request[p], j++, 0, cfg_aggr);
+		request_arg(aggr_request[p], j++, 0, cfg_aggr_out);
+
+		aggr_response[p] = inaccel_submit(aggr_request[p]);
+		if(!aggr_response[p]){
+			printf("Error at submit\n");
+			exit(1);
+		}
+	}
+	for (int p = 0; p < partition_num; p++) {
+		if( inaccel_wait(aggr_response[p])){
+			std::cout << "Error at Aggr wait " << p  << std::endl;
+			exit(1);
+		}
+		request_free(aggr_request[p]);
+
         // 5)memcpy out
-        aggr_mout[p].p = p;
-        aggr_mout[p].valid_col_num = out_ncol;
-        // did work in 64bit impl
-        aggr_mout[p].tab_col_type_size = tab_out_col_size;
-        aggr_mout[p].write_flag = write_flag;
-        aggr_mout[p].merge_info = merge_info;
-        aggr_mout[p].key_num = key_num;
-        aggr_mout[p].pld_num = out_ncol - key_num;
-        aggr_mout[p].event = &evt_aggr_memcpy_out[p][0];
-        aggr_mout[p].meta = &meta_aggr_out[kid];
-        for (int c = 0; c < 16; c++) {
-            if (write_flag[c]) {
-                aggr_mout[p].ptr_src[c] = tab_aggr_out_col[c][kid];
-                aggr_mout[p].ptr_dst[c] = tab_aggr_res_col[c];
-            }
-        }
-        aggr_mout[p].num_event_wait_list = evt_aggr_d2h[p].size();
-        aggr_mout[p].event_wait_list = evt_aggr_d2h[p].data();
-        if (kid == 0) pool.q8_ping.push(aggr_mout[p]);
-        if (kid == 1) pool.q8_pong.push(aggr_mout[p]);
+		int nrow = meta_aggr_out[p].getColLen();
+		std::cout << "output nrow[" << p << "] = " << nrow << std::endl;
+
+		// in int32 imp, suppose all the col are int32, after aggr, when int64, use the
+		// tab_out.tab_col_type_size
+		for (int c = 0; c < 16; c++) {
+			if (write_flag[c])
+				memcpy(tab_aggr_res_col[c] + aggr_sum_nrow * sizeof(int), tab_aggr_out_col[c][p], nrow * sizeof(int));
+		}
+		aggr_sum_nrow += nrow;
+		std::cout << "output aggr_sum_nrow[" << p << "] = " << aggr_sum_nrow << std::endl;
     }
-    // clFinish(cq);
-    clWaitForEvents(evt_aggr_memcpy_out[partition_num - 1].size(), evt_aggr_memcpy_out[partition_num - 1].data());
-    if (partition_num > 1) {
-        clWaitForEvents(evt_aggr_memcpy_out[partition_num - 2].size(), evt_aggr_memcpy_out[partition_num - 2].data());
-    }
-    timer_aggr.add();
+
 
 #ifdef AGGR_PERF_PROFILE
     for (int p = 0; p < partition_num; p++) {
@@ -2298,69 +1615,31 @@ ErrCode Aggregator::aggr_sol2(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
         }
         input_memcpy_size = input_memcpy_size / 1024 / 1024;
 
-        clGetEventProfilingInfo(evt_aggr_h2d[p][0], CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
-        clGetEventProfilingInfo(evt_aggr_h2d[p][0], CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
-        evt_ns = end - start;
-        std::cout << "Part: " << p << ", h2d, size: " << input_memcpy_size << " MB, time: " << double(evt_ns) / 1000000
-                  << " ms, throughput: " << input_memcpy_size / 1024 / ((double)evt_ns / 1000000000) << " GB/s "
+        std::cout << "Part: " << p << ", h2d, size: " << input_memcpy_size << " MB"
                   << std::endl;
 
-        clGetEventProfilingInfo(evt_aggr_krn[p][0], CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
-        clGetEventProfilingInfo(evt_aggr_krn[p][0], CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
-        evt_ns = end - start;
-        std::cout << "Part: " << p << ", krn, size: " << input_memcpy_size << " MB, time: " << double(evt_ns) / 1000000
-                  << " ms, throughput: " << input_memcpy_size / 1024 / ((double)evt_ns / 1000000000) << " GB/s "
-                  << std::endl;
-
-        clGetEventProfilingInfo(evt_aggr_d2h[p][0], CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
-        clGetEventProfilingInfo(evt_aggr_d2h[p][0], CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
-        evt_ns = end - start;
         double output_memcpy_size = 0;
         for (int pp = 0; pp < 16; pp++) {
             if (write_flag[pp]) output_memcpy_size += (double)aggr_result_nrow_512_size;
         }
         output_memcpy_size = output_memcpy_size / 1024 / 1024;
-        std::cout << "Part: " << p << ", d2h, size: " << output_memcpy_size << " MB, time: " << double(evt_ns) / 1000000
-                  << " ms, throughput: " << output_memcpy_size / 1024 / ((double)evt_ns / 1000000000) << " GB/s "
+        std::cout << "Part: " << p << ", d2h, size: " << output_memcpy_size << " MB"
                   << std::endl;
     }
 
 #endif
-    pool.q7_ping_run = 0;
-    pool.q7_pong_run = 0;
-    pool.q8_ping_run = 0;
-    pool.q8_pong_run = 0;
-
-    pool.aggr_in_ping_t.join();
-    pool.aggr_in_pong_t.join();
-    pool.aggr_out_ping_t.join();
-    pool.aggr_out_pong_t.join();
 
     double l_input_memcpy_size = 0;
     for (int i = 0; i < l_ncol; i++) {
         l_input_memcpy_size += (double)l_nrow * tab_in_col_size[i];
     }
     l_input_memcpy_size = l_input_memcpy_size / 1024 / 1024;
-    double l_output_memcpy_size = (double)pool.aggr_sum_nrow * out_ncol * sizeof(int64_t) / 1024 / 1024;
+    double l_output_memcpy_size = (double)aggr_sum_nrow * out_ncol * sizeof(int64_t) / 1024 / 1024;
     std::cout << "-----------------------Data Transfer Info-----------------------" << std::endl;
     std::cout << "H2D size = " << l_input_memcpy_size << " MB" << std::endl;
     std::cout << "D2H size = " << l_output_memcpy_size << " MB" << std::endl;
 
-    double tvtime_aggr = timer_aggr.getMilliSec();
-    std::cout << "------------------------Performance Info------------------------" << std::endl;
-    std::cout << "Tab L pipelined partition, time: " << (double)tvtime_part / 1000
-              << " ms, throughput: " << l_input_memcpy_size / 1024 / ((double)tvtime_part / 1000000) << " GB/s"
-              << std::endl;
-
-    std::cout << "aggr pipelined, time: " << (double)tvtime_aggr / 1000
-              << " ms, throughput: " << l_input_memcpy_size / 1024 / ((double)tvtime_aggr / 1000000) << " GB/s"
-              << std::endl;
-
-    std::cout << "All time: " << (double)(tvtime_part + tvtime_aggr) / 1000
-              << " ms, throughput: " << l_input_memcpy_size / 1024 / ((double)(tvtime_part + tvtime_aggr) / 1000000)
-              << " GB/s" << std::endl;
-
-    tab_out.setRowNum(pool.aggr_sum_nrow);
+    tab_out.setRowNum(aggr_sum_nrow);
     // tab_out.setWColNum(out_ncol);
     char** cos_of_table_out = new char*[out_ncol];
     for (int i = 0; i < out_ncol; i++) {
@@ -2373,21 +1652,21 @@ ErrCode Aggregator::aggr_sol2(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
         auto index = merge_info[i];
         if (index.size() == 1) {
             if (tab_out_col_size[i] == 4) {
-                memcpy(cos_of_table_out[i], tab_aggr_res_col[index[0]], 4 * pool.aggr_sum_nrow);
+                memcpy(cos_of_table_out[i], tab_aggr_res_col[index[0]], 4 * aggr_sum_nrow);
             } else if (tab_out_col_size[i] == 8) {
                 // sign extend the low
-                zipInt64(cos_of_table_out[i], tab_aggr_res_col[index[0]], nullptr, pool.aggr_sum_nrow);
+                zipInt64(cos_of_table_out[i], tab_aggr_res_col[index[0]], nullptr, aggr_sum_nrow);
             } else {
                 assert(0 && "Illegal column size");
             }
         } else if (index.size() == 2) {
             if (tab_out_col_size[i] == 4) {
                 // truncate and just keep the low bits.
-                memcpy(cos_of_table_out[i], tab_aggr_res_col[index[0]], 4 * pool.aggr_sum_nrow);
+                memcpy(cos_of_table_out[i], tab_aggr_res_col[index[0]], 4 * aggr_sum_nrow);
             } else if (tab_out_col_size[i] == 8) {
                 // zip
                 zipInt64(cos_of_table_out[i], tab_aggr_res_col[index[0]], tab_aggr_res_col[index[1]],
-                         pool.aggr_sum_nrow);
+                         aggr_sum_nrow);
             } else {
                 assert(0 && "Illegal column size");
             }
@@ -2398,7 +1677,6 @@ ErrCode Aggregator::aggr_sol2(Table& tab_in, Table& tab_out, AggrConfig& aggr_cf
 
     std::cout << "Aggr done, table saved: " << tab_out.getRowNum() << " rows," << tab_out.getColNum() << " cols"
               << std::endl;
-*/
     return SUCCESS;
 }
 

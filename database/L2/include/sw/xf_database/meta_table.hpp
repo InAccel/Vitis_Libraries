@@ -20,6 +20,8 @@
 // L2
 #include "xf_database/gqe_utils.hpp"
 
+#include <inaccel/coral.h>
+
 namespace xf {
 namespace database {
 namespace gqe {
@@ -72,10 +74,9 @@ class MetaTable {
 
    public:
     MetaTable() {
-        _mbuf = gqe::utils::aligned_alloc<ap_uint<512> >(_metaDepth);
-        memset(_mbuf, 0, sizeof(ap_uint<512>) * _metaDepth);
+        _mbuf = (ap_uint<512>*) cube_alloc(sizeof(ap_uint<512>) * _metaDepth);
     };
-    ~MetaTable() { free(_mbuf); };
+    ~MetaTable() { cube_free(_mbuf); };
 
     //! convert meta struct data to ap_uint, which can be transferred to kernel
     ap_uint<512>* meta() {
