@@ -17,20 +17,30 @@
 #ifndef _XF_FINTECH_BINOMIAL_TREE_H_
 #define _XF_FINTECH_BINOMIAL_TREE_H_
 
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
+#include <chrono>
 #include <vector>
 
-#include "xf_fintech_device.hpp"
-#include "xf_fintech_ocl_controller.hpp"
-#include "xf_fintech_types.hpp"
-
-// reference binomial tree engine in L2
-#include "xf_fintech/bt_engine.hpp"
+#include <inaccel/coral>
 
 namespace xf {
 namespace fintech {
+
+const static int BinomialTreeEuropeanPut = 1;
+const static int BinomialTreeEuropeanCall = 2;
+const static int BinomialTreeAmericanPut = 3;
+const static int BinomialTreeAmericanCall = 4;
+
+struct BinomialTreeInputDataType {
+    double S;
+    double K;
+    double T;
+    double rf;
+    double V;
+    double q;
+    int N;
+    int packed[3]; // Bitwidth of (packed) data on axi master must be power of 2
+                   // (set to support float)
+};
 
 /**
  * @class BinomialTree
@@ -42,10 +52,10 @@ namespace fintech {
  * the calculated output data (one or more options) will be available to the user.
  */
 
-class BinomialTree : public OCLController {
+class BinomialTree {
    public:
-    BinomialTree(std::string xclbin_file);
-    virtual ~BinomialTree();
+    BinomialTree();
+    virtual ~BinomialTree() { }
 
     /**
      * Calculate one or more options based on input data and option type
@@ -55,7 +65,7 @@ class BinomialTree : public OCLController {
      * @param optionType option type is American/European Call or Put
      * @param numOptions number of options to be calculate
      */
-    int run(xf::fintech::BinomialTreeInputDataType<double>* inputData,
+    void run(xf::fintech::BinomialTreeInputDataType* inputData,
             double* outputData,
             int optionType,
             int numOptions);
@@ -68,38 +78,10 @@ class BinomialTree : public OCLController {
    private:
     static const int MAX_OPTION_CALCULATIONS = 1024;
 
-    // add new kernels in here
-    enum BinomialKernelType { bt_kernel_double_pe1 = 0, bt_kernel_double_pe4 = 1, bt_kernel_double_pe8 = 2 };
-
-    // set the kernel in use
-    // static const BinomialKernelType kernelInUse = bt_kernel_double_pe1;
-    // static const BinomialKernelType kernelInUse = bt_kernel_double_pe4;
-    // default built with PE=8
-    static const BinomialKernelType kernelInUse = bt_kernel_double_pe8;
-
-    // OCLController interface
-    int createOCLObjects(Device* device);
-    int releaseOCLObjects(void);
-
-    cl::Context* m_pContext;
-    cl::CommandQueue* m_pCommandQueue;
-    cl::Program::Binaries m_binaries;
-    cl::Program* m_pProgram;
-    cl::Kernel* m_pBinomialKernel;
-
-    cl::Buffer* m_pHwInputBuffer;
-    cl::Buffer* m_pHwOutputBuffer;
-
-    std::vector<xf::fintech::BinomialTreeInputDataType<double>,
-                aligned_allocator<xf::fintech::BinomialTreeInputDataType<double> > >
-        m_hostInputBuffer;
-    std::vector<double, aligned_allocator<double> > m_hostOutputBuffer;
+    inaccel::vector<xf::fintech::BinomialTreeInputDataType> m_hostInputBuffer;
+    inaccel::vector<double> m_hostOutputBuffer;
 
    private:
-    std::string getKernelTypeSubString(void);
-
-    std::string m_xclbin_file;
-    std::string getXCLBINName(Device* device);
     std::chrono::time_point<std::chrono::high_resolution_clock> m_runStartTime;
     std::chrono::time_point<std::chrono::high_resolution_clock> m_runEndTime;
 };

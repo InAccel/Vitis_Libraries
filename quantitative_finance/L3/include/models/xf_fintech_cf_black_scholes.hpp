@@ -18,16 +18,17 @@
 #define _XF_FINTECH_CF_BLACK_SCHOLES_H_
 
 #include <chrono>
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
 
-#include "xf_fintech_device.hpp"
-#include "xf_fintech_ocl_controller.hpp"
-#include "xf_fintech_types.hpp"
+#include <inaccel/coral>
 
 namespace xf {
 namespace fintech {
+
+typedef enum {
+    Call = 0,
+    Put = 1
+
+} OptionType;
 
 /**
  * @class CFBlackScholes
@@ -44,9 +45,9 @@ namespace fintech {
  * When run completes, the calculated output data will be available in the
  * relevant output buffers.
  */
-class CFBlackScholes : public OCLController {
+class CFBlackScholes {
    public:
-    CFBlackScholes(unsigned int maxAssetsPerRun, std::string xclbin_file);
+    CFBlackScholes(unsigned int maxAssetsPerRun);
     virtual ~CFBlackScholes();
 
    public:
@@ -82,7 +83,24 @@ class CFBlackScholes : public OCLController {
      * @param optionType The option type of ALL the assets data
      * @param numAssets The number of assets to process.
      */
-    int run(OptionType optionType, unsigned int numAssets);
+    void run(OptionType optionType, unsigned int numAssets);
+
+	/**
+     * This method is used to begin processing the asset data that is in the input
+     * buffers.
+     * This functions is asynchonous so a call to wait must be made to wait the
+     * calculation of the results
+     *
+     * @param optionType The option type of ALL the assets data
+     */
+    void runAsync(OptionType optionType, unsigned int numAssets);
+
+	/**
+	 * This method is used to wait the calculation of the results
+	 * If this function returns successfully, calculated results are available in
+	 * the output buffers.
+	 */
+	void wait();
 
    public:
     /**
@@ -93,19 +111,11 @@ class CFBlackScholes : public OCLController {
     long long int getLastRunTime(void); // in microseconds
 
    protected:
-    // OCLController interface
-    int createOCLObjects(Device* device);
-    int releaseOCLObjects(void);
-
-   protected:
     void allocateBuffers(unsigned int numRequestedElements);
     void deallocateBuffers(void);
 
    protected:
     unsigned int calculatePaddedNumElements(unsigned int numRequestedElements);
-    virtual const char* getKernelName();
-    std::string m_xclbin_file;
-    std::string getXCLBINName(Device* device);
 
    protected:
     unsigned int m_numPaddedBufferElements;
@@ -114,32 +124,7 @@ class CFBlackScholes : public OCLController {
     static const unsigned int KERNEL_PARAMETER_BITWIDTH = 512;
     static const unsigned int NUM_ELEMENTS_PER_BUFFER_CHUNK;
 
-   protected:
-    cl::Context* m_pContext;
-
-   private:
-    cl::Program::Binaries m_binaries;
-
-    cl::Program* m_pProgram;
-
-   protected:
-    cl::CommandQueue* m_pCommandQueue;
-    cl::Kernel* m_pKernel;
-
-   protected:
-    cl::Buffer* m_pStockPriceHWBuffer;
-    cl::Buffer* m_pStrikePriceHWBuffer;
-    cl::Buffer* m_pVolatilityHWBuffer;
-    cl::Buffer* m_pRiskFreeRateHWBuffer;
-    cl::Buffer* m_pTimeToMaturityHWBuffer;
-
-    cl::Buffer* m_pOptionPriceHWBuffer;
-
-    cl::Buffer* m_pDeltaHWBuffer;
-    cl::Buffer* m_pGammaHWBuffer;
-    cl::Buffer* m_pVegaHWBuffer;
-    cl::Buffer* m_pThetaHWBuffer;
-    cl::Buffer* m_pRhoHWBuffer;
+	std::future<void> response;
 
    protected:
     std::chrono::time_point<std::chrono::high_resolution_clock> m_runStartTime;

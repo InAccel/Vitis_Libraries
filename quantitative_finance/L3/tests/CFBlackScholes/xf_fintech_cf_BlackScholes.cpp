@@ -15,60 +15,19 @@
  */
 
 #include <stdio.h>
-#include <string.h>
 
 #include <chrono>
 #include <vector>
 
-#include "xf_fintech_api.hpp"
+#include "models/xf_fintech_cf_black_scholes.hpp"
 
 using namespace xf::fintech;
 
-static const unsigned int numAssets = 100;
+static const unsigned int numAssets = 100000;
 
-static float tolerance = 0.001;
+CFBlackScholes cfBlackScholes(numAssets);
 
-static int check(float actual, float expected, float tol) {
-    int ret = 1; // assume pass
-    if (std::abs(actual - expected) > tol) {
-        printf("ERROR: expected %0.6f, got %0.6f\n", expected, actual);
-        ret = 0;
-    }
-    return ret;
-}
-
-int main(int argc, char** argv) {
-    int retval = XLNX_OK;
-
-    std::string path = std::string(argv[1]);
-    CFBlackScholes cfBlackScholes(numAssets, path);
-
-    std::string device = TOSTRING(DEVICE_PART);
-    if (argc == 3) {
-        device = std::string(argv[2]);
-    }
-
-    std::vector<Device*> deviceList;
-    Device* pChosenDevice;
-
-    // Get a list of U250s available on the system (just because our current
-    // bitstreams are built for U250s)
-    deviceList = DeviceManager::getDeviceList(device);
-
-    if (deviceList.size() == 0) {
-        printf("[XLNX] No matching devices found\n");
-        exit(0);
-    }
-
-    printf("[XLNX] Found %zu matching devices\n", deviceList.size());
-
-    // we'll just pick the first device in the...
-    pChosenDevice = deviceList[0];
-
-    retval = cfBlackScholes.claimDevice(pChosenDevice);
-
-    int ret = 0; // assume pass
-    if (retval == XLNX_OK) {
+int main() {
         // Populate the asset data...
         for (unsigned int i = 0; i < numAssets; i++) {
             cfBlackScholes.stockPrice[i] = 100.0f;
@@ -99,26 +58,6 @@ int main(int argc, char** argv) {
             printf("[XLNX] | %5u | %8.5f | %8.5f | %8.5f | %8.5f | %8.5f | %8.5f |\n", i, cfBlackScholes.optionPrice[i],
                    cfBlackScholes.delta[i], cfBlackScholes.gamma[i], cfBlackScholes.vega[i], cfBlackScholes.theta[i],
                    cfBlackScholes.rho[i]);
-
-            // quick fix to get pass/fail criteria
-            if (!check(cfBlackScholes.optionPrice[i], 2.82636, tolerance)) {
-                ret = 1;
-            }
-            if (!check(cfBlackScholes.delta[i], -0.38209, tolerance)) {
-                ret = 1;
-            }
-            if (!check(cfBlackScholes.gamma[i], 0.03814, tolerance)) {
-                ret = 1;
-            }
-            if (!check(cfBlackScholes.vega[i], 0.38139, tolerance)) {
-                ret = 1;
-            }
-            if (!check(cfBlackScholes.theta[i], -0.00241, tolerance)) {
-                ret = 1;
-            }
-            if (!check(cfBlackScholes.rho[i], 0.41035, tolerance)) {
-                ret = 1;
-            }
         }
 
         printf(
@@ -126,14 +65,6 @@ int main(int argc, char** argv) {
             "+-------+----------+----------+----------+----------+----------+------"
             "----+\n");
         printf("[XLNX] Processed %u assets in %lld us\n", numAssets, cfBlackScholes.getLastRunTime());
-    }
 
-    cfBlackScholes.releaseDevice();
-
-    if (!ret) {
-        printf("PASS\n");
-    } else {
-        printf("FAIL\n");
-    }
-    return ret;
+    return 0;
 }

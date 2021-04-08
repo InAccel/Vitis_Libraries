@@ -18,16 +18,15 @@
 #define _XF_FINTECH_MC_AMERICAN_H_
 
 #include <chrono>
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
-
-#include "xf_fintech_device.hpp"
-#include "xf_fintech_ocl_controller.hpp"
-#include "xf_fintech_types.hpp"
 
 namespace xf {
 namespace fintech {
+
+typedef enum {
+    Call = 0,
+    Put = 1
+
+} OptionType;
 
 /**
  * @class MCAmerican
@@ -35,7 +34,7 @@ namespace fintech {
  * @brief This class implements the Monte-Carlo American model.
  *
  */
-class MCAmerican : public OCLController {
+class MCAmerican {
    public:
     MCAmerican();
     virtual ~MCAmerican();
@@ -55,7 +54,7 @@ class MCAmerican : public OCLController {
      * @param pOptionPrice the returned option price
      *
      */
-    int run(OptionType optionType,
+    void run(OptionType optionType,
             double stockPrice,
             double strikePrice,
             double riskFreeRate,
@@ -79,7 +78,7 @@ class MCAmerican : public OCLController {
      * @param pOptionPrice the returned option price
      *
      */
-    int run(OptionType optionType,
+    void run(OptionType optionType,
             double stockPrice,
             double strikePrice,
             double riskFreeRate,
@@ -98,12 +97,7 @@ class MCAmerican : public OCLController {
     long long int getLastRunTime(void);
 
    private:
-    // OCLController interface
-    int createOCLObjects(Device* device);
-    int releaseOCLObjects(void);
-
-   private:
-    int runInternal(OptionType optionType,
+    void runInternal(OptionType optionType,
                     double stockPrice,
                     double strikePrice,
                     double riskFreeRate,
@@ -115,38 +109,13 @@ class MCAmerican : public OCLController {
                     double* pOptionPrice);
 
    private:
-    std::string getXCLBINName(Device* device);
-
-   private:
-    cl::Context* m_pContext;
-    cl::CommandQueue* m_pCommandQueue;
-
-    cl::Program::Binaries m_binaries;
-
-    cl::Program* m_pProgram;
-
     uint8_t* m_hostOutputPricesBuffer;
     uint8_t* m_hostOutputMatrixBuffer;
     uint8_t* m_hostCoeffBuffer;
     void* m_hostOutputBuffer1;
     void* m_hostOutputBuffer2;
 
-    cl::Kernel* m_pPreSampleKernel;
-    cl::Kernel* m_pCalibrationKernel;
-    cl::Kernel* m_pPricingKernel1;
-    cl::Kernel* m_pPricingKernel2;
-
-    cl_mem_ext_ptr_t m_outputPriceBufferOptions;
-    cl_mem_ext_ptr_t m_outputMatrixBufferOptions;
-    cl_mem_ext_ptr_t m_coeffBufferOptions;
-    cl_mem_ext_ptr_t m_outputBufferOptions1;
-    cl_mem_ext_ptr_t m_outputBufferOptions2;
-
-    cl::Buffer* m_pHWOutputPriceBuffer;
-    cl::Buffer* m_pHWOutputMatrixBuffer;
-    cl::Buffer* m_pHWCoeffBuffer;
-    cl::Buffer* m_pHWOutputBuffer1;
-    cl::Buffer* m_pHWOutputBuffer2;
+    int flag = 1;
 
    private:
     std::chrono::time_point<std::chrono::high_resolution_clock> m_runStartTime;
