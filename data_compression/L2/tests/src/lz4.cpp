@@ -16,6 +16,7 @@
  */
 #include "lz4.hpp"
 #include "xxhash.h"
+#include <inaccel/coral>
 
 #define BLOCK_SIZE 64
 #define KB 1024
@@ -26,9 +27,20 @@
 #define MAGIC_BYTE_4 24
 #define FLG_BYTE 104
 
-uint64_t xfLz4::compressFile(std::string& inFile_name, std::string& outFile_name, uint64_t input_size, bool m_flow) {
-    m_SwitchFlow = m_flow;
-    if (m_SwitchFlow == 0) { // Xilinx FPGA compression flow
+int validate(std::string& inFile_name, std::string& outFile_name) {
+    std::string command = "cmp " + inFile_name + " " + outFile_name;
+    int ret = system(command.c_str());
+    return ret;
+}
+
+// Constructor
+xfLz4::xfLz4(uint32_t req_num): m_req_num(req_num) {}
+
+// Destructor
+xfLz4::~xfLz4() {}
+
+uint64_t xfLz4::compressFile(std::string& inFile_name, std::string& outFile_name, uint64_t input_size) {
+    if (m_switch_flow == 0) { // Xilinx FPGA compression flow
         std::ifstream inFile(inFile_name.c_str(), std::ifstream::binary);
         std::ofstream outFile(outFile_name.c_str(), std::ofstream::binary);
 
@@ -37,8 +49,8 @@ uint64_t xfLz4::compressFile(std::string& inFile_name, std::string& outFile_name
             exit(1);
         }
 
-        std::vector<uint8_t, aligned_allocator<uint8_t> > in(input_size);
-        std::vector<uint8_t, aligned_allocator<uint8_t> > out(input_size);
+        std::vector<uint8_t> in(input_size);
+        std::vector<uint8_t> out(input_size);
 
         inFile.read((char*)in.data(), input_size);
 
@@ -77,10 +89,6 @@ uint64_t xfLz4::compressFile(std::string& inFile_name, std::string& outFile_name
                 break;
         }
 
-        uint32_t host_buffer_size = HOST_BUFFER_SIZE;
-
-        if ((m_BlockSizeInKb * 1024) > input_size) host_buffer_size = m_BlockSizeInKb * 1024;
-
         uint8_t temp_buff[10] = {FLG_BYTE,         block_size_header, input_size,       input_size >> 8,
                                  input_size >> 16, input_size >> 24,  input_size >> 32, input_size >> 40,
                                  input_size >> 48, input_size >> 56};
@@ -93,7 +101,7 @@ uint64_t xfLz4::compressFile(std::string& inFile_name, std::string& outFile_name
         // Header CRC
         outFile.put((uint8_t)(xxh >> 8));
         // LZ4 multiple/single cu sequential version
-        enbytes = compressSequential(in.data(), out.data(), input_size, host_buffer_size);
+        enbytes = compressSequential(in.data(), out.data(), input_size);
         // Writing compressed data
         outFile.write((char*)out.data(), enbytes);
 
@@ -107,7 +115,7 @@ uint64_t xfLz4::compressFile(std::string& inFile_name, std::string& outFile_name
         outFile.close();
         return enbytes;
     } else { // Standard LZ4 flow
-        std::string command = "lz4 --content-size -f -q " + inFile_name;
+        std::string command = "../../../common/lz4/lz4 --content-size -f -q " + inFile_name;
         system(command.c_str());
         std::string output = inFile_name + ".lz4";
         std::string rout = inFile_name + ".std.lz4";
@@ -117,67 +125,159 @@ uint64_t xfLz4::compressFile(std::string& inFile_name, std::string& outFile_name
     }
 }
 
-int validate(std::string& inFile_name, std::string& outFile_name) {
-    std::string command = "cmp " + inFile_name + " " + outFile_name;
-    int ret = system(command.c_str());
-    return ret;
-}
+// Note: Various block sizes supported by LZ4 standard are not applicable to
+// this function. It just supports Block Size 64KB
+uint64_t xfLz4::compressSequential(uint8_t* in, uint8_t* out, uint64_t input_size) {
+    uint32_t block_size_in_bytes = m_BlockSizeInKb * 1024;
 
-// Constructor
-xfLz4::xfLz4(const std::string& binaryFile, uint8_t flow, uint32_t block_size_kb) {
-    h_buf_in.resize(HOST_BUFFER_SIZE);
-    h_buf_out.resize(HOST_BUFFER_SIZE);
-    h_blksize.resize(MAX_NUMBER_BLOCKS);
-    h_compressSize.resize(MAX_NUMBER_BLOCKS);
+    uint32_t blocks_per_chunk = 1;
+    if(block_size_in_bytes < input_size) blocks_per_chunk = 32;
 
-    m_compressSize.reserve(MAX_NUMBER_BLOCKS);
-    m_blkSize.reserve(MAX_NUMBER_BLOCKS);
+    uint32_t chunk_size = block_size_in_bytes * blocks_per_chunk;
 
-    // unsigned fileBufSize;
-    // The get_xil_devices will return vector of Xilinx Devices
-    std::vector<cl::Device> devices = xcl::get_xil_devices();
-    cl::Device device = devices[0];
+    uint32_t chunk_num = (input_size - 1) / chunk_size + 1;
 
-    // Creating Context and Command Queue for selected Device
-    m_context = new cl::Context(device);
-    m_q = new cl::CommandQueue(*m_context, device, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE | CL_QUEUE_PROFILING_ENABLE);
-    std::string device_name = device.getInfo<CL_DEVICE_NAME>();
-    std::cout << "Found Device=" << device_name.c_str() << std::endl;
+    std::vector<inaccel::vector<uint8_t>> buffers_in(chunk_num);
+    std::vector<inaccel::vector<uint8_t>> buffers_out(chunk_num);
+    std::vector<inaccel::vector<uint32_t>> compressed_block_sizes_out(chunk_num);
+    std::vector<inaccel::vector<uint32_t>> block_sizes_in(chunk_num);
 
-    // import_binary() command will find the OpenCL binary file created using the
-    // v++ compiler load into OpenCL Binary and return as Binaries
-    // OpenCL and it can contain many functions which can be executed on the
-    // device.
-    auto fileBuf = xcl::read_binary_file(binaryFile);
-    cl::Program::Binaries bins{{fileBuf.data(), fileBuf.size()}};
-    devices.resize(1);
+    std::chrono::duration<double, std::nano> kernel_time_ns_1(0);
 
-    m_program = new cl::Program(*m_context, devices, bins);
-    m_BinFlow = flow;
-    m_BlockSizeInKb = block_size_kb;
-    // Create Compress kernels
-    if (flow == 1 || flow == 2) compress_kernel_lz4 = new cl::Kernel(*m_program, compress_kernel_names[0].c_str());
+    std::vector<std::future<void>> responses(m_req_num);
 
-    // Create Decompress kernels
-    if (flow == 0 || flow == 2) decompress_kernel_lz4 = new cl::Kernel(*m_program, decompress_kernel_names[0].c_str());
-}
+    for (uint32_t chunkIdx = 0; chunkIdx < chunk_num; ++chunkIdx) {
+        uint32_t curr_chunk_size = chunk_size;
+        if(chunkIdx*chunk_size + curr_chunk_size > input_size)
+            curr_chunk_size = input_size - chunkIdx*chunk_size;
 
-// Destructor
-xfLz4::~xfLz4() {
-    if (m_BinFlow) {
-        delete (compress_kernel_lz4);
+        uint32_t curr_blocks = (curr_chunk_size - 1) / block_size_in_bytes + 1;
+
+        buffers_in[chunkIdx].resize(curr_chunk_size);
+        buffers_out[chunkIdx].resize(curr_chunk_size);
+        std::memcpy(buffers_in[chunkIdx].data(), &in[chunkIdx*chunk_size], curr_chunk_size);
+
+        compressed_block_sizes_out[chunkIdx].resize(curr_blocks);
+        block_sizes_in[chunkIdx].resize(curr_blocks);
+
+        for (uint32_t blockIdx = 0; blockIdx < curr_blocks; ++blockIdx) {
+            uint32_t block_size = block_size_in_bytes;
+            if (blockIdx*block_size_in_bytes + block_size > curr_chunk_size) {
+                block_size = curr_chunk_size - blockIdx*block_size_in_bytes;
+            }
+            block_sizes_in[chunkIdx][blockIdx] = block_size;
+        }
     }
-    if (m_BinFlow == 0 || m_BinFlow == 2) {
-        delete (decompress_kernel_lz4);
+
+    for (uint32_t chunkIdx = 0; chunkIdx < chunk_num; chunkIdx+=m_req_num) {
+
+        auto kernel_start = std::chrono::high_resolution_clock::now();
+
+        for (unsigned req = 0; req < m_req_num; req++) {
+            if(chunkIdx+req < chunk_num) {
+                inaccel::request req("com.xilinx.vitis.dataCompression.lz4.compress");
+                req.arg(buffers_in[chunkIdx+req]);
+                req.arg(buffers_out[chunkIdx+req]);
+                req.arg(compressed_block_sizes_out[chunkIdx+req]);
+                req.arg(block_sizes_in[chunkIdx+req]);
+                req.arg(m_BlockSizeInKb);
+                req.arg((uint32_t)buffers_in[chunkIdx+req].size());
+
+                responses[req] = inaccel::submit(req);
+            }
+        }
+
+        for (unsigned req = 0; req < m_req_num; req++) {
+            if(chunkIdx+req < chunk_num)
+                responses[req].get();
+        }
+
+        auto kernel_end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration<double, std::nano>(kernel_end - kernel_start);
+        kernel_time_ns_1 += duration;
     }
-    delete (m_program);
-    delete (m_q);
-    delete (m_context);
+
+    // Keeps track of output buffer index
+    uint64_t outIdx = 0;
+    for (uint32_t chunkIdx = 0; chunkIdx < chunk_num; ++chunkIdx) {
+        uint32_t curr_chunk_size = chunk_size;
+        if(chunkIdx*chunk_size + curr_chunk_size > input_size)
+            curr_chunk_size = input_size - chunkIdx*chunk_size;
+
+        uint32_t curr_blocks = (curr_chunk_size - 1) / block_size_in_bytes + 1;
+
+        for (uint32_t blockIdx = 0; blockIdx < curr_blocks; ++blockIdx) {
+            uint32_t block_size = block_size_in_bytes;
+            if (blockIdx*block_size_in_bytes + block_size > curr_chunk_size) {
+                block_size = curr_chunk_size - blockIdx*block_size_in_bytes;
+            }
+
+            uint32_t compressed_size = compressed_block_sizes_out[chunkIdx][blockIdx];
+            assert(compressed_size != 0);
+
+            int perc_cal = curr_chunk_size * 10;
+            perc_cal = perc_cal / block_size;
+
+            if (compressed_size < block_size && perc_cal >= 10) {
+                std::memcpy(out + outIdx, &compressed_size, 4);
+                outIdx += 4;
+                std::memcpy(out + outIdx, &(buffers_out[chunkIdx][blockIdx*block_size_in_bytes]), compressed_size);
+                outIdx += compressed_size;
+            } else {
+                if (block_size == block_size_in_bytes) {
+                    out[outIdx++] = 0;
+                    out[outIdx++] = 0;
+
+                    switch (c_input_size) {
+                        case MAX_BSIZE_64KB:
+                            out[outIdx++] = BSIZE_NCOMP_64;
+                            break;
+                        case MAX_BSIZE_256KB:
+                            out[outIdx++] = BSIZE_NCOMP_256;
+                            break;
+                        case MAX_BSIZE_1024KB:
+                            out[outIdx++] = BSIZE_NCOMP_1024;
+                            break;
+                        case MAX_BSIZE_4096KB:
+                            out[outIdx++] = BSIZE_NCOMP_4096;
+                            break;
+                        default:
+                            out[outIdx++] = BSIZE_NCOMP_64;
+                            break;
+                    }
+
+                    out[outIdx++] = NO_COMPRESS_BIT;
+                } else {
+                    uint8_t tmp = c_input_size;
+                    out[outIdx++] = tmp;
+                    tmp = c_input_size >> 8;
+                    out[outIdx++] = tmp;
+                    tmp = c_input_size >> 16;
+                    out[outIdx++] = tmp;
+                    out[outIdx++] = NO_COMPRESS_BIT;
+                }
+                std::memcpy(out + outIdx, &(buffers_in[chunkIdx][blockIdx*block_size_in_bytes]), block_size);
+                outIdx += block_size;
+            }
+        } // End of chunk (block by block) copy to output buffer
+
+
+        buffers_in[chunkIdx].resize(0);
+        buffers_out[chunkIdx].resize(0);
+        compressed_block_sizes_out[chunkIdx].resize(0);
+        block_sizes_in[chunkIdx].resize(0);
+        blocks_in[chunkIdx].shrink_to_fit();
+        buffers_out[chunkIdx].shrink_to_fit();
+        compressed_block_sizes_out[i].shrink_to_fit();
+        block_sizes_in[chunkIdx].shrink_to_fit();
+    }
+    float throughput_in_mbps_1 = (float)input_size * 1000 / kernel_time_ns_1.count();
+    std::cout << std::fixed << std::setprecision(2) << "KT(MBps)\t\t:" << throughput_in_mbps_1 << std::endl;
+    return outIdx;
 }
 
-uint64_t xfLz4::decompressFile(std::string& inFile_name, std::string& outFile_name, uint64_t input_size, bool m_flow) {
-    m_SwitchFlow = m_flow;
-    if (m_SwitchFlow == 0) {
+uint64_t xfLz4::decompressFile(std::string& inFile_name, std::string& outFile_name, uint64_t input_size) {
+    if (m_switch_flow == 0) {
         std::ifstream inFile(inFile_name.c_str(), std::ifstream::binary);
         std::ofstream outFile(outFile_name.c_str(), std::ofstream::binary);
 
@@ -186,14 +286,14 @@ uint64_t xfLz4::decompressFile(std::string& inFile_name, std::string& outFile_na
             exit(1);
         }
 
-        std::vector<uint8_t, aligned_allocator<uint8_t> > in(input_size);
+        std::vector<uint8_t > in(input_size);
 
         // Read magic header 4 bytes
         char c = 0;
         char magic_hdr[] = {MAGIC_BYTE_1, MAGIC_BYTE_2, MAGIC_BYTE_3, MAGIC_BYTE_4};
         for (uint32_t i = 0; i < MAGIC_HEADER_SIZE; i++) {
             inFile.get(c);
-            if (int(c) == magic_hdr[i])
+            if (c == magic_hdr[i])
                 continue;
             else {
                 std::cout << "Problem with magic header " << c << " " << i << std::endl;
@@ -225,6 +325,7 @@ uint64_t xfLz4::decompressFile(std::string& inFile_name, std::string& outFile_na
                 std::cout << "Invalid Block Size" << std::endl;
                 break;
         }
+        // printf("m_BlockSizeInKb %d \n", m_BlockSizeInKb);
 
         // Original size
         uint64_t original_size = 0;
@@ -233,26 +334,21 @@ uint64_t xfLz4::decompressFile(std::string& inFile_name, std::string& outFile_na
         // printf("original_size %d \n", original_size);
 
         // Allocat output size
-        std::vector<uint8_t, aligned_allocator<uint8_t> > out(original_size);
+        std::vector<uint8_t> out(original_size);
 
         // Read block data from compressed stream .lz4
         inFile.read((char*)in.data(), (input_size - 15));
 
-        uint32_t maxNumBlks = (HOST_BUFFER_SIZE) / (m_BlockSizeInKb * 1024);
-        uint64_t host_buffer_size = (m_BlockSizeInKb * 1024) * maxNumBlks;
-
-        if ((m_BlockSizeInKb * 1024) > original_size) host_buffer_size = m_BlockSizeInKb * 1024;
-
         uint64_t debytes;
         // Decompression Sequential multiple cus.
-        debytes = decompressSequential(in.data(), out.data(), (input_size - 15), original_size, host_buffer_size);
+        debytes = decompressSequential(in.data(), out.data(), (input_size - 15), original_size);
         outFile.write((char*)out.data(), debytes);
         // Close file
         inFile.close();
         outFile.close();
         return debytes;
     } else {
-        std::string command = "lz4 --content-size -f -q -d " + inFile_name;
+        std::string command = "../../../common/lz4/lz4 --content-size -f -q -d " + inFile_name;
         system(command.c_str());
         return 0;
     }
@@ -261,389 +357,156 @@ uint64_t xfLz4::decompressFile(std::string& inFile_name, std::string& outFile_na
 // Note: Various block sizes supported by LZ4 standard are not applicable to
 // this function. It just supports Block Size 64KB
 uint64_t xfLz4::decompressSequential(
-    uint8_t* in, uint8_t* out, uint64_t input_size, uint64_t original_size, uint64_t host_buffer_size) {
-    uint32_t max_num_blks = (host_buffer_size) / (m_BlockSizeInKb * 1024);
-
-    h_buf_in.resize(host_buffer_size);
-    h_buf_out.resize(host_buffer_size);
-    h_blksize.resize(max_num_blks);
-    h_compressSize.resize(max_num_blks);
-
-    m_compressSize.reserve(max_num_blks);
-    m_blkSize.reserve(max_num_blks);
-
+    uint8_t* in, uint8_t* out, uint64_t input_size, uint64_t original_size) {
     uint32_t block_size_in_bytes = m_BlockSizeInKb * 1024;
 
-    // Total number of blocks exists for this file
-    uint32_t total_block_cnt = (original_size - 1) / block_size_in_bytes + 1;
+    uint32_t blocks_per_chunk = 1;
+    if(block_size_in_bytes < input_size) blocks_per_chunk = 32;
+
+    uint32_t chunk_size = block_size_in_bytes * blocks_per_chunk;
+
+    uint32_t chunk_num = (input_size - 1) / chunk_size + 1;
+
+    uint32_t total_block_count = (original_size - 1) / block_size_in_bytes + 1;
     uint32_t block_cntr = 0;
     uint32_t done_block_cntr = 0;
 
+    std::vector<inaccel::vector<uint8_t>> buffers_in(chunk_num);
+    std::vector<inaccel::vector<uint8_t>> buffers_out(chunk_num);
+    std::vector<inaccel::vector<uint32_t>> compressed_block_sizes_in(chunk_num);
+    std::vector<inaccel::vector<uint32_t>> block_sizes_in(chunk_num);
+
     uint32_t no_compress_case = 0;
     std::chrono::duration<double, std::nano> kernel_time_ns_1(0);
+
+    std::vector<std::future<void>> responses(m_req_num);
+
     uint64_t inIdx = 0;
-    uint64_t total_decomression_size = 0;
+    uint64_t total_decompressed_size = 0;
 
-    uint64_t hostChunk_cu;
-    uint32_t compute_cu;
-    uint64_t output_idx = 0;
+    for (uint32_t chunkIdx = 0; chunkIdx < chunk_num; ++chunkIdx) {
+        buffers_in[chunkIdx].resize(blocks_per_chunk*block_size_in_bytes);
+        buffers_out[chunkIdx].resize(blocks_per_chunk*block_size_in_bytes);
+        compressed_block_sizes_in[chunkIdx].resize(blocks_per_chunk);
+        block_sizes_in[chunkIdx].resize(blocks_per_chunk);
 
-    // To handle uncompressed blocks
-    bool compressBlk = false;
+        uint64_t curr_chunk_size = 0;
+        uint64_t cIdx = 0;
 
-    for (uint64_t outIdx = 0; outIdx < original_size; outIdx += host_buffer_size) {
-        compute_cu = 0;
-        uint64_t chunk_size = host_buffer_size;
-
-        // Figure out the chunk size for each compute unit
-        hostChunk_cu = 0;
-        if (outIdx + (chunk_size) > original_size) {
-            hostChunk_cu = original_size - (outIdx);
-            compute_cu++;
-        } else {
-            hostChunk_cu = chunk_size;
-            compute_cu++;
-        }
-
-        uint32_t nblocks;
-        uint32_t bufblocks;
-        uint64_t total_size;
-        uint64_t buf_size;
-        uint32_t block_size = 0;
-        uint32_t compressed_size = 0;
-
-        nblocks = 0;
-        buf_size = 0;
-        bufblocks = 0;
-        total_size = 0;
-        for (uint64_t cIdx = 0; cIdx < hostChunk_cu; cIdx += block_size_in_bytes, nblocks++, total_size += block_size) {
-            if (block_cntr == (total_block_cnt - 1)) {
-                block_size = original_size - done_block_cntr * block_size_in_bytes;
-            } else {
-                block_size = block_size_in_bytes;
-            }
-
-            std::memcpy(&compressed_size, &in[inIdx], 4);
+        //loop to find chunk size and compressed block sizes
+        for (uint32_t blockIdx = 0; blockIdx < blocks_per_chunk; ++blockIdx) {
+            std::memcpy(&compressed_block_sizes_in[chunkIdx][blockIdx], &in[inIdx], 4);
             inIdx += 4;
-
-            uint32_t tmp = compressed_size;
+            uint32_t tmp = compressed_block_sizes_in[chunkIdx][blockIdx];
             tmp >>= 24;
 
             if (tmp == 128) {
-                uint8_t b1 = compressed_size;
-                uint8_t b2 = compressed_size >> 8;
-                uint8_t b3 = compressed_size >> 16;
-                // uint8_t b4 = compressed_size >> 24;
+                uint8_t b1 = compressed_block_sizes_in[chunkIdx][blockIdx];
+                uint8_t b2 = compressed_block_sizes_in[chunkIdx][blockIdx] >> 8;
+                uint8_t b3 = compressed_block_sizes_in[chunkIdx][blockIdx] >> 16;
+                // uint8_t b4 = compressed_block_sizes_in[chunkIdx][blockIdx] >> 24;
 
                 if (b3 == 1) {
-                    compressed_size = block_size_in_bytes;
+                    compressed_block_sizes_in[chunkIdx][blockIdx] = block_size_in_bytes;
                 } else {
                     uint16_t size = 0;
                     size = b2;
                     size <<= 8;
                     uint16_t temp = b1;
                     size |= temp;
-                    compressed_size = size;
+                    compressed_block_sizes_in[chunkIdx][blockIdx] = size;
                 }
             }
 
-            // Fill original block size and compressed size
-            m_blkSize.data()[nblocks] = block_size;
-            m_compressSize.data()[nblocks] = compressed_size;
+            curr_chunk_size += compressed_block_sizes_in[chunkIdx][blockIdx];
+
+            block_sizes_in[chunkIdx][blockIdx] = block_size_in_bytes;
+            if(chunkIdx*blocks_per_chunk + blockIdx == total_block_count - 1) {
+                block_sizes_in[chunkIdx][blockIdx] = original_size -
+                    (chunkIdx*blocks_per_chunk + blockIdx)*block_size_in_bytes;
+            }
 
             // If compressed size is less than original block size
-            if (compressed_size < block_size) {
-                h_compressSize.data()[bufblocks] = compressed_size;
-                h_blksize.data()[bufblocks] = block_size;
-                std::memcpy(&(h_buf_in.data()[buf_size]), &in[inIdx], compressed_size);
-                inIdx += compressed_size;
-                buf_size += block_size_in_bytes;
-                bufblocks++;
-                compressBlk = true;
-            } else if (compressed_size == block_size) {
+            if (compressed_block_sizes_in[chunkIdx][blockIdx] < block_sizes_in[chunkIdx][blockIdx]) {
+                std::memcpy(&(buffers_in[chunkIdx][blockIdx*block_size_in_bytes]),
+                            &in[inIdx], compressed_block_sizes_in[chunkIdx][blockIdx]);
+                inIdx += compressed_block_sizes_in[chunkIdx][blockIdx];
+            } else if (compressed_block_sizes_in[chunkIdx][blockIdx] == block_sizes_in[chunkIdx][blockIdx]) {
                 no_compress_case++;
                 // No compression block
-                std::memcpy(&(out[outIdx + cIdx]), &in[inIdx], block_size);
-                inIdx += block_size;
+                std::memcpy(out + (chunkIdx*blocks_per_chunk + blockIdx)*block_size_in_bytes,
+                            in + inIdx, block_sizes_in[chunkIdx][blockIdx]);
+                total_decompressed_size += block_sizes_in[chunkIdx][blockIdx];
             } else {
                 assert(0);
             }
-            block_cntr++;
-            done_block_cntr++;
+            inIdx += compressed_block_sizes_in[chunkIdx][blockIdx];
+
+            if(inIdx >= input_size || (chunkIdx*blocks_per_chunk + blockIdx == total_block_count - 1))
+                break;
         }
-        assert(total_size <= original_size);
+    }
 
-        if (nblocks == 1 && compressed_size == block_size) break;
 
-        if (compressBlk) {
-            // Device buffer allocation
-            buffer_input =
-                new cl::Buffer(*m_context, CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY, buf_size, h_buf_in.data());
+    for (uint32_t chunkIdx = 0; chunkIdx < chunk_num; chunkIdx+=m_req_num) {
 
-            buffer_output =
-                new cl::Buffer(*m_context, CL_MEM_USE_HOST_PTR | CL_MEM_READ_WRITE, buf_size, h_buf_out.data());
-
-            buffer_block_size = new cl::Buffer(*m_context, CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                               sizeof(uint32_t) * bufblocks, h_blksize.data());
-
-            buffer_compressed_size = new cl::Buffer(*m_context, CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                                    sizeof(uint32_t) * bufblocks, h_compressSize.data());
-
-            // Set kernel arguments
-            uint32_t narg = 0;
-            decompress_kernel_lz4->setArg(narg++, *(buffer_input));
-            decompress_kernel_lz4->setArg(narg++, *(buffer_output));
-            decompress_kernel_lz4->setArg(narg++, *(buffer_block_size));
-            decompress_kernel_lz4->setArg(narg++, *(buffer_compressed_size));
-            decompress_kernel_lz4->setArg(narg++, m_BlockSizeInKb);
-            decompress_kernel_lz4->setArg(narg++, bufblocks);
-
-            std::vector<cl::Memory> inBufVec;
-            inBufVec.push_back(*(buffer_input));
-            inBufVec.push_back(*(buffer_block_size));
-            inBufVec.push_back(*(buffer_compressed_size));
-
-            // Migrate memory - Map host to device buffers
-            m_q->enqueueMigrateMemObjects(inBufVec, 0 /* 0 means from host*/);
-            m_q->finish();
-
-            auto kernel_start = std::chrono::high_resolution_clock::now();
-            // Kernel invocation
-            m_q->enqueueTask(*decompress_kernel_lz4);
-            m_q->finish();
-
-            auto kernel_end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration<double, std::nano>(kernel_end - kernel_start);
-            kernel_time_ns_1 += duration;
-
-            std::vector<cl::Memory> outBufVec;
-            outBufVec.push_back(*(buffer_output));
-
-            // Migrate memory - Map device to host buffers
-            m_q->enqueueMigrateMemObjects(outBufVec, CL_MIGRATE_MEM_OBJECT_HOST);
-            m_q->finish();
-        }
-        uint32_t bufIdx = 0;
-        for (uint32_t bIdx = 0, idx = 0; bIdx < nblocks; bIdx++, idx += block_size_in_bytes) {
-            uint32_t block_size = m_blkSize.data()[bIdx];
-            uint32_t compressed_size = m_compressSize.data()[bIdx];
-            if (compressed_size < block_size) {
-                std::memcpy(&out[output_idx], &h_buf_out.data()[bufIdx], block_size);
-                output_idx += block_size;
-                bufIdx += block_size;
-                total_decomression_size += block_size;
-            } else if (compressed_size == block_size) {
-                output_idx += block_size;
-            }
-        }
-
-        if (compressBlk) {
-            // Delete device buffers
-            delete (buffer_input);
-            delete (buffer_output);
-            delete (buffer_block_size);
-            delete (buffer_compressed_size);
-        }
-    } // Top - Main loop ends here
-
-    float throughput_in_mbps_1 = 0;
-    if (kernel_time_ns_1.count())
-        throughput_in_mbps_1 = (float)total_decomression_size * 1000 / kernel_time_ns_1.count();
-    std::cout << std::fixed << std::setprecision(2) << throughput_in_mbps_1;
-    return original_size;
-
-} // End of decompress
-
-// Note: Various block sizes supported by LZ4 standard are not applicable to
-// this function. It just supports Block Size 64KB
-uint64_t xfLz4::compressSequential(uint8_t* in, uint8_t* out, uint64_t input_size, uint32_t host_buffer_size) {
-    uint32_t max_num_blks = (host_buffer_size) / (m_BlockSizeInKb * 1024);
-
-    h_buf_in.resize(host_buffer_size);
-    h_buf_out.resize(host_buffer_size);
-    h_blksize.resize(max_num_blks);
-    h_compressSize.resize(max_num_blks);
-
-    m_compressSize.reserve(max_num_blks);
-    m_blkSize.reserve(max_num_blks);
-
-    uint32_t block_size_in_kb = m_BlockSizeInKb;
-    uint32_t block_size_in_bytes = block_size_in_kb * 1024;
-
-    uint32_t no_compress_case = 0;
-
-    std::chrono::duration<double, std::nano> kernel_time_ns_1(0);
-
-    // Keeps track of output buffer index
-    uint64_t outIdx = 0;
-
-    // Given a input file, we process it as multiple chunks
-    // Each compute unit is assigned with a chunk of data
-    // In this example HOST_BUFFER_SIZE is the chunk size.
-    // For example: Input file = 12 MB
-    //              HOST_BUFFER_SIZE = 2MB
-    // Each compute unit processes 2MB data per kernel invocation
-    uint32_t hostChunk_cu;
-
-    // This buffer contains total number of m_BlockSizeInKb blocks per CU
-    // For Example: HOST_BUFFER_SIZE = 2MB/m_BlockSizeInKb = 32block (Block
-    // size 64 by default)
-    uint32_t total_blocks_cu;
-
-    // This buffer holds exact size of the chunk in bytes for all the CUs
-    uint32_t bufSize_in_bytes_cu;
-
-    // Holds value of total compute units to be
-    // used per iteration
-    uint32_t compute_cu = 0;
-
-    for (uint64_t inIdx = 0; inIdx < input_size; inIdx += host_buffer_size) {
-        // Needs to reset this variable
-        // As this drives compute unit launch per iteration
-        compute_cu = 0;
-
-        // Pick buffer size as predefined one
-        // If yet to be consumed input is lesser
-        // the reset to required size
-        uint32_t buf_size = host_buffer_size;
-
-        // This loop traverses through each compute based current inIdx
-        // It tries to calculate chunk size and total compute units need to be
-        // launched (based on the input_size)
-        hostChunk_cu = 0;
-        // If amount of data to be consumed is less than HOST_BUFFER_SIZE
-        // Then choose to send is what is needed instead of full buffer size
-        // based on host buffer macro
-        if (inIdx + (buf_size) > input_size) {
-            hostChunk_cu = input_size - (inIdx);
-            compute_cu++;
-        } else {
-            hostChunk_cu = buf_size;
-            compute_cu++;
-        }
-        // Figure out total number of blocks need per each chunk
-        // Copy input data from in to host buffer based on the inIdx and cu
-        uint32_t nblocks = (hostChunk_cu - 1) / block_size_in_bytes + 1;
-        total_blocks_cu = nblocks;
-        std::memcpy(h_buf_in.data(), &in[inIdx], hostChunk_cu);
-
-        // Fill the host block size buffer with various block sizes per chunk/cu
-        uint32_t bIdx = 0;
-        uint32_t chunkSize_curr_cu = hostChunk_cu;
-
-        for (uint32_t bs = 0; bs < chunkSize_curr_cu; bs += block_size_in_bytes) {
-            uint32_t block_size = block_size_in_bytes;
-            if (bs + block_size > chunkSize_curr_cu) {
-                block_size = chunkSize_curr_cu - bs;
-            }
-            h_blksize.data()[bIdx++] = block_size;
-        }
-
-        // Calculate chunks size in bytes for device buffer creation
-        bufSize_in_bytes_cu = ((hostChunk_cu - 1) / m_BlockSizeInKb + 1) * m_BlockSizeInKb;
-
-        // Device buffer allocation
-        buffer_input =
-            new cl::Buffer(*m_context, CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY, bufSize_in_bytes_cu, h_buf_in.data());
-
-        buffer_output =
-            new cl::Buffer(*m_context, CL_MEM_USE_HOST_PTR | CL_MEM_READ_WRITE, bufSize_in_bytes_cu, h_buf_out.data());
-
-        buffer_compressed_size = new cl::Buffer(*m_context, CL_MEM_USE_HOST_PTR | CL_MEM_WRITE_ONLY,
-                                                sizeof(uint32_t) * total_blocks_cu, h_compressSize.data());
-
-        buffer_block_size = new cl::Buffer(*m_context, CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                           sizeof(uint32_t) * total_blocks_cu, h_blksize.data());
-
-        // Set kernel arguments
-        uint32_t narg = 0;
-        compress_kernel_lz4->setArg(narg++, *(buffer_input));
-        compress_kernel_lz4->setArg(narg++, *(buffer_output));
-        compress_kernel_lz4->setArg(narg++, *(buffer_compressed_size));
-        compress_kernel_lz4->setArg(narg++, *(buffer_block_size));
-        compress_kernel_lz4->setArg(narg++, block_size_in_kb);
-        compress_kernel_lz4->setArg(narg++, hostChunk_cu);
-        std::vector<cl::Memory> inBufVec;
-
-        inBufVec.push_back(*(buffer_input));
-        inBufVec.push_back(*(buffer_block_size));
-
-        // Migrate memory - Map host to device buffers
-        m_q->enqueueMigrateMemObjects(inBufVec, 0 /* 0 means from host*/);
-        m_q->finish();
-
-        // Measure kernel execution time
         auto kernel_start = std::chrono::high_resolution_clock::now();
+        for (unsigned req = 0; req < m_req_num; req++) {
+            if(chunkIdx+req < chunk_num) {
+                uint32_t bufblocks = 0;
+                for (uint32_t blockIdx = 0; blockIdx < blocks_per_chunk; ++blockIdx)
+                    if (compressed_block_sizes_in[chunkIdx+req][blockIdx] <
+                            block_sizes_in[chunkIdx+req][blockIdx])
+                        bufblocks++;
 
-        // Fire kernel execution
-        m_q->enqueueTask(*compress_kernel_lz4);
-        // Wait till kernels complete
-        m_q->finish();
+                if(bufblocks) {
+                    inaccel::request req("com.xilinx.vitis.dataCompression.lz4.decompress");
+                    req.arg(buffers_in[chunkIdx+req]);
+                    req.arg(buffers_out[chunkIdx+req]);
+                    req.arg(block_sizes_in[chunkIdx+req]);
+                    req.arg(compressed_block_sizes_in[chunkIdx+req]);
+                    req.arg(m_BlockSizeInKb);
+                    req.arg(bufblocks);
+
+                    responses[req] = inaccel::submit(req);
+                }
+                else responses[req] = NULL;
+            }
+        }
+
+        for (unsigned req = 0; req < m_req_num; req++) {
+            if(chunkIdx+req < chunk_num && responses[req])
+                responses[req].get();
+        }
 
         auto kernel_end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration<double, std::nano>(kernel_end - kernel_start);
         kernel_time_ns_1 += duration;
-
-        // Setup output buffer vectors
-        std::vector<cl::Memory> outBufVec;
-        outBufVec.push_back(*(buffer_output));
-        outBufVec.push_back(*(buffer_compressed_size));
-
-        // Migrate memory - Map device to host buffers
-        m_q->enqueueMigrateMemObjects(outBufVec, CL_MIGRATE_MEM_OBJECT_HOST);
-        m_q->finish();
-
-        // Copy data into out buffer
-        // Include compress and block size data
-        // Copy data block by block within a chunk example 2MB (64block size) - 32 blocks data
-        // Do the same for all the compute units
-        uint32_t idx = 0;
-        for (uint32_t bIdx = 0; bIdx < total_blocks_cu; bIdx++, idx += block_size_in_bytes) {
-            // Default block size in bytes i.e., 64 * 1024
-            uint32_t block_size = block_size_in_bytes;
-            if (idx + block_size > hostChunk_cu) {
-                block_size = hostChunk_cu - idx;
-            }
-            uint32_t compressed_size = h_compressSize.data()[bIdx];
-            assert(compressed_size != 0);
-
-            int orig_block_size = hostChunk_cu;
-            int perc_cal = orig_block_size * 10;
-            perc_cal = perc_cal / block_size;
-
-            if (compressed_size < block_size && perc_cal >= 10) {
-                memcpy(&out[outIdx], &compressed_size, 4);
-                outIdx += 4;
-                std::memcpy(&out[outIdx], &(h_buf_out.data()[bIdx * block_size_in_bytes]), compressed_size);
-                outIdx += compressed_size;
-            } else {
-                // No Compression, so copy raw data
-                no_compress_case++;
-                if (block_size == 65536) {
-                    out[outIdx++] = 0;
-                    out[outIdx++] = 0;
-                    out[outIdx++] = 1;
-                    out[outIdx++] = 128;
-                } else {
-                    uint8_t temp = 0;
-                    temp = block_size;
-                    out[outIdx++] = temp;
-                    temp = block_size >> 8;
-                    out[outIdx++] = temp;
-                    out[outIdx++] = 0;
-                    out[outIdx++] = 128;
-                }
-                std::memcpy(&out[outIdx], &in[inIdx + idx], block_size);
-                outIdx += block_size;
-            }
-        } // End of chunk (block by block) copy to output buffer
-        // Buffer deleted
-        delete (buffer_input);
-        delete (buffer_output);
-        delete (buffer_compressed_size);
-        delete (buffer_block_size);
     }
-    float throughput_in_mbps_1 = (float)input_size * 1000 / kernel_time_ns_1.count();
-    std::cout << std::fixed << std::setprecision(2) << throughput_in_mbps_1;
-    return outIdx;
-}
+
+    for (uint32_t chunkIdx = 0; chunkIdx < chunk_num; ++chunkIdx) {
+        for (uint32_t blockIdx = 0; blockIdx < blocks_per_chunk; ++blockIdx) {
+            if (compressed_block_sizes_in[chunkIdx][blockIdx] <
+                    block_sizes_in[chunkIdx][blockIdx]) {
+                std::memcpy(out + (chunkIdx*blocks_per_chunk + blockIdx)*block_size_in_bytes,
+                            buffers_out[chunkIdx] + blockIdx*block_size_in_bytes,
+                            block_sizes_in[chunkIdx][blockIdx]);
+                total_decompressed_size += block_sizes_in[chunkIdx][blockIdx];
+            }
+        }
+
+        buffers_in[chunkIdx].resize(0);
+        buffers_out[chunkIdx].resize(0);
+        block_sizes_in[chunkIdx].resize(0);
+        compressed_block_sizes_in[chunkIdx].resize(0);
+        blocks_in[chunkIdx].shrink_to_fit();
+        buffers_out[chunkIdx].shrink_to_fit();
+        block_sizes_in[chunkIdx].shrink_to_fit();
+        compressed_block_sizes_in[i].shrink_to_fit();
+    }
+
+    float throughput_in_mbps_1 = (float)total_decompressed_size * 1000 / kernel_time_ns_1.count();
+    std::cout << std::fixed << std::setprecision(2) << "KT(MBps)\t\t:" << throughput_in_mbps_1 << std::endl;
+
+    return original_size;
+} // End of decompress

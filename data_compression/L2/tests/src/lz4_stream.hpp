@@ -33,48 +33,12 @@
 #include <time.h>
 #include <string>
 #include <fstream>
-#include "xcl2.hpp"
-// This extension file is required for stream APIs
-#include <CL/cl_ext_xilinx.h>
-
-/**
- * Maximum compute units supported
- */
-#if (C_COMPUTE_UNIT > D_COMPUTE_UNIT)
-#define MAX_COMPUTE_UNITS C_COMPUTE_UNIT
-#else
-#define MAX_COMPUTE_UNITS D_COMPUTE_UNIT
-#endif
-
-/**
- * Enable/diasble p2p flow
- * by default disable
- */
-#ifndef ENABLE_P2P
-#define ENABLE_P2P 0
-#endif
-
-/**
- * Maximum host buffer used to operate per kernel invocation
- */
-#define HOST_BUFFER_SIZE (64 * 1024 * 1024)
+#include <chrono>
 
 /**
  * Default block size
  */
 #define BLOCK_SIZE_IN_KB 64
-
-/**
- * Value below is used to associate with
- * Overlapped buffers, ideally overlapped
- * execution requires 2 resources per invocation
- */
-#define OVERLAP_BUF_COUNT 2
-
-/**
- * Maximum number of blocks based on host buffer size
- */
-#define MAX_NUMBER_BLOCKS (HOST_BUFFER_SIZE / (BLOCK_SIZE_IN_KB * 1024))
 
 /**
  * Below are the codes as per LZ4 standard for
@@ -121,6 +85,13 @@
  */
 int validate(std::string& inFile_name, std::string& outFile_name);
 
+static uint64_t getFileSize(std::ifstream& file) {
+    file.seekg(0, file.end);
+    uint64_t file_size = file.tellg();
+    file.seekg(0, file.beg);
+    return file_size;
+}
+
 /**
  *  xfLz4Streaming class. Class containing methods for LZ4
  * compression and decompression to be executed on host side.
@@ -144,7 +115,7 @@ class xfLz4Streaming {
      * @param outFile_name output file name
      * @param actual_size input size
      */
-    uint64_t compressFile(std::string& inFile_name, std::string& outFile_name, uint64_t actual_size, bool m_flow);
+    uint64_t compressFile(std::string& inFile_name, std::string& outFile_name, uint64_t actual_size);
 
     /**
      * @brief Decompress the input file.
@@ -153,19 +124,7 @@ class xfLz4Streaming {
      * @param outFile_name output file name
      * @param actual_size input size
      */
-    uint64_t decompressFile(std::string& inFile_name, std::string& outFile_name, uint64_t actual_size, bool m_flow);
-
-    /**
-    * @brief Decompress the input file full.
-    *
-    * @param inFile_name input file name
-    * @param outFile_name output file name
-    * @param input_size input size
-    * @param m_flow decompress flow
-    * @param enable_p2p runs p2p mode
-    */
-    uint32_t decompressFileFull(
-        std::string& inFile_name, std::string& outFile_name, uint32_t inputSize, bool m_flow, bool enable_p2p = 0);
+    uint64_t decompressFile(std::string& inFile_name, std::string& outFile_name, uint64_t actual_size);
 
     /**
      * @brief Decompress streaming.
@@ -179,83 +138,28 @@ class xfLz4Streaming {
     uint64_t decompressStream(uint8_t* in, uint8_t* out, uint64_t actual_size, uint64_t original_size);
 
     /**
-    * @brief Decompress sequential migrate full inputSize.
-    *
-    * @param in input byte sequence
-    * @param out output byte sequence
-    * @param input_size input size
-    * @param m_flow decompress flow
-    * @param enable_p2p runs p2p mode
-    */
-    uint32_t decompressFull(uint8_t* in, uint8_t* out, uint32_t inputSize, bool enable_p2p = 0);
+     * Block Size
+     */
+    uint32_t m_BlockSizeInKb;
 
     /**
-     * @brief Get the duration of input event
-     *
-     * @param event event to get duration for
+     * Switch between FPGA/Standard flows
      */
-    uint64_t getEventDurationNs(const cl::Event& event);
+    bool m_switch_flow;
 
+    uint32_t m_req_num;
     /**
      * @brief Class constructor
      *
      * @param binaryFile file to be read
      * @param flow 0 for compression, 1 for decompression
      */
-    xfLz4Streaming(const std::string& binaryFile, uint8_t flow, uint32_t m_block_kb);
+    xfLz4Streaming(uint32_t req_num);
 
     /**
      * @brief Class destructor.
      */
     ~xfLz4Streaming();
-
-   private:
-    /**
-     * Binary flow compress/decompress
-     */
-    bool m_BinFlow;
-    /**
-     * Block Size
-     */
-    uint32_t m_BlockSizeInKb;
-    /**
-      * Switch between FPGA/Standard flows
-      */
-    bool m_SwitchFlow;
-
-    cl::Device m_device;
-    cl::Program* m_program;
-    cl::Context* m_context;
-    cl::CommandQueue* m_q;
-    cl::Kernel* compress_kernel_lz4;
-    cl::Kernel* compress_data_mover_kernel;
-    cl::Kernel* decompress_kernel_lz4;
-    cl::Kernel* decompress_data_mover_kernel;
-
-    // Compression related
-    std::vector<uint8_t, aligned_allocator<uint8_t> > h_buf_in;
-    std::vector<uint8_t, aligned_allocator<uint8_t> > h_buf_out;
-    std::vector<uint32_t, aligned_allocator<uint32_t> > h_buf_decompressSize;
-    std::vector<uint32_t, aligned_allocator<uint8_t> > h_blksize;
-    std::vector<uint32_t, aligned_allocator<uint8_t> > h_compressSize;
-
-    // Device buffers
-    cl::Buffer* buffer_input;
-    cl::Buffer* buffer_output;
-    cl::Buffer* bufferOutputSize;
-    cl::Buffer* buffer_compressed_size;
-    cl::Buffer* buffer_block_size;
-
-    // Decompression related
-    std::vector<uint32_t> m_blkSize;
-    std::vector<uint32_t> m_compressSize;
-    std::vector<bool> m_is_compressed;
-
-    // Kernel names
-    std::string compress_kernel_name = "xilLz4CompressStream";
-    std::string compress_dm_kernel_name = "xilCompDatamover";
-    std::string decompress_kernel_name = "xilLz4DecompressStream";
-    std::string decompress_dm_kernel_name = "xilDecompDatamover";
 };
 
 #endif // _XFCOMPRESSION_LZ4_STREAM_HPP_

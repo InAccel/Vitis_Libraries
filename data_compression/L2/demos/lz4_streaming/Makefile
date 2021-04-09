@@ -54,7 +54,7 @@ TARGET ?= sw_emu
 # ################### Setting up default value of DEVICE ##############################
 DEVICE ?= xilinx_u200_xdma_201830_2
 
-# ###################### Setting up default value of HOST_ARCH ####################### 
+# ###################### Setting up default value of HOST_ARCH #######################
 HOST_ARCH ?= x86
 
 # #################### Checking if DEVICE in blacklist #############################
@@ -95,7 +95,6 @@ export XCL_BINDIR = $(XCLBIN_DIR)
 #Include Required Host Source Files
 HOST_SRCS += $(CUR_DIR)/src/host.cpp
 HOST_SRCS += $(XFLIB_DIR)/L2/tests/src/lz4_stream.cpp
-HOST_SRCS += $(XFLIB_DIR)/common/libs/xcl2/xcl2.cpp
 HOST_SRCS += $(XFLIB_DIR)/common/libs/cmdparser/cmdlineparser.cpp
 HOST_SRCS += $(XFLIB_DIR)/common/libs/logger/logger.cpp
 HOST_SRCS += $(XFLIB_DIR)/common/thirdParty/xxhash/xxhash.c
@@ -103,7 +102,6 @@ HOST_SRCS += $(XFLIB_DIR)/common/thirdParty/xxhash/xxhash.c
 CXXFLAGS += -DPARALLEL_BLOCK=8
 CXXFLAGS += -I$(XFLIB_DIR)/L2/tests/src/
 CXXFLAGS += -I$(XFLIB_DIR)/common/thirdParty/xxhash
-CXXFLAGS += -I$(XFLIB_DIR)/common/libs/xcl2
 CXXFLAGS += -I$(XFLIB_DIR)/common/libs/cmdparser
 CXXFLAGS += -I$(XFLIB_DIR)/common/libs/logger
 
@@ -117,9 +115,9 @@ endif
 
 # ######################### Host compiler global settings ############################
 CXXFLAGS += -I$(XILINX_XRT)/include -I$(XILINX_VIVADO)/include -std=c++11 -O3 -Wall -Wno-unknown-pragmas -Wno-unused-label
-LDFLAGS += -L$(XILINX_XRT)/lib -lOpenCL -lpthread -lrt -Wno-unused-label -Wno-narrowing -DVERBOSE
-CXXFLAGS += -fmessage-length=0 
-CXXFLAGS += -I$(CUR_DIR)/src/ 
+LDFLAGS += -L$(XILINX_XRT)/lib -lOpenCL -lpthread -lrt -Wno-unused-label -Wno-narrowing -DVERBOSE -lcoral-api -fopenmp
+CXXFLAGS += -fmessage-length=0 -O3 -D_GLIBCXX_USE_CXX11_ABI=0 -fopenmp
+CXXFLAGS += -I$(CUR_DIR)/src/
 
 # ################### Setting package and image directory #######################
 PKG_OUT_DIR := package_$(TARGET)
@@ -137,7 +135,7 @@ VPP_FLAGS += -I$(XFLIB_DIR)/L2/include
 VPP_FLAGS += -I$(XFLIB_DIR)/L2/src
 
 
-VPP_FLAGS += -DPARALLEL_BLOCK=8 
+VPP_FLAGS += -DPARALLEL_BLOCK=8
 
 # Kernel linker flags
 VPP_LDFLAGS_compress_streaming_temp := --config $(CUR_DIR)/compress.ini
@@ -229,13 +227,13 @@ cleanh:
 cleank:
 	-$(RMDIR) $(BUILD_DIR)/*.xclbin _vimage *xclbin.run_summary qemu-memory-_* emulation/ _vimage/ pl* start_simulation.sh *.xclbin
 	-$(RMDIR) _x_temp.*/_x.* _x_temp.*/.Xil _x_temp.*/profile_summary.* xo_* _x*
-	-$(RMDIR) _x_temp.*/dltmp* _x_temp.*/kernel_info.dat _x_temp.*/*.log 
-	-$(RMDIR) _x_temp.* 
+	-$(RMDIR) _x_temp.*/dltmp* _x_temp.*/kernel_info.dat _x_temp.*/*.log
+	-$(RMDIR) _x_temp.*
 
 cleanall: cleanh cleank
 	-$(RMDIR) $(BUILD_DIR)  build_dir.* emconfig.json *.html $(TEMP_DIR) $(CUR_DIR)/reports *.csv *.run_summary $(CUR_DIR)/*.raw package_* run_script.sh .ipcache *.str
 	-$(RMDIR) $(XFLIB_DIR)/common/data/*.xe2xd* $(XFLIB_DIR)/common/data/*.orig*
-	-$(RMDIR) ./sample.txt.* ./sample_run.* ./test.list 
+	-$(RMDIR) ./sample.txt.* ./sample_run.* ./test.list
 	-$(RMDIR) $(AIE_CONTAINERS) $(CUR_DIR)/Work $(CUR_DIR)/*.xpe $(CUR_DIR)/hw.o $(CUR_DIR)/*.xsa $(CUR_DIR)/xnwOut aiesimulator_output .AIE_SIM_CMD_LINE_OPTIONS
 
 clean: cleanh

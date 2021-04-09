@@ -25,13 +25,12 @@
 #define _XFCOMPRESSION_LZ4_HPP_
 
 #include <cassert>
-#include "xcl2.hpp"
 #include <iomanip>
 
 /**
  * Maximum host buffer used to operate per kernel invocation
  */
-#define HOST_BUFFER_SIZE (32 * 1024 * 1024)
+#define HOST_BUFFER_SIZE (2 * 1024 * 1024)
 
 /**
  * Default block size
@@ -88,24 +87,19 @@
  */
 int validate(std::string& inFile_name, std::string& outFile_name);
 
+static uint64_t getFileSize(std::ifstream& file) {
+    file.seekg(0, file.end);
+    uint64_t file_size = file.tellg();
+    file.seekg(0, file.beg);
+    return file_size;
+}
+
 /**
  *  xfLz4 class. Class containing methods for LZ4
  * compression and decompression to be executed on host side.
  */
 class xfLz4 {
    public:
-    /**
-     * @brief Initialize the class object.
-     *
-     * @param binaryFile file to be read
-     */
-    int init(const std::string& binaryFile);
-
-    /**
-     * @brief release
-     *
-     */
-    int release();
 
     /**
      * @brief Compress sequential
@@ -115,7 +109,7 @@ class xfLz4 {
      * @param actual_size input size
      * @param host_buffer_size host buffer size
      */
-    uint64_t compressSequential(uint8_t* in, uint8_t* out, uint64_t actual_size, uint32_t host_buffer_size);
+    uint64_t compressSequential(uint8_t* in, uint8_t* out, uint64_t actual_size);
 
     /**
      * @brief Compress the input file.
@@ -124,7 +118,7 @@ class xfLz4 {
      * @param outFile_name output file name
      * @param actual_size input size
      */
-    uint64_t compressFile(std::string& inFile_name, std::string& outFile_name, uint64_t actual_size, bool m_flow);
+    uint64_t compressFile(std::string& inFile_name, std::string& outFile_name, uint64_t actual_size);
 
     /**
      * @brief Decompress the input file.
@@ -133,7 +127,7 @@ class xfLz4 {
      * @param outFile_name output file name
      * @param actual_size input size
      */
-    uint64_t decompressFile(std::string& inFile_name, std::string& outFile_name, uint64_t actual_size, bool m_flow);
+    uint64_t decompressFile(std::string& inFile_name, std::string& outFile_name, uint64_t actual_size);
 
     /**
      * @brief Decompress sequential.
@@ -145,26 +139,7 @@ class xfLz4 {
      * @param host_buffer_size host buffer size
      */
     uint64_t decompressSequential(
-        uint8_t* in, uint8_t* out, uint64_t actual_size, uint64_t original_size, uint64_t host_buffer_size);
-
-    uint64_t getEventDurationNs(const cl::Event& event);
-
-    /**
-     * @brief Initialize host/device and OpenCL Setup
-     *
-     */
-    xfLz4(const std::string& binaryFileName, uint8_t flow, uint32_t block_size_kb);
-
-    /**
-     * @brief Release host/device and OpenCL setup
-     */
-    ~xfLz4();
-
-   private:
-    /**
-     * Binary flow compress/decompress
-     */
-    uint8_t m_BinFlow;
+        uint8_t* in, uint8_t* out, uint64_t actual_size, uint64_t original_size);
 
     /**
      * Block Size
@@ -174,33 +149,19 @@ class xfLz4 {
     /**
      * Switch between FPGA/Standard flows
      */
-    bool m_SwitchFlow;
+    bool m_switch_flow;
 
-    cl::Program* m_program;
-    cl::Context* m_context;
-    cl::CommandQueue* m_q;
-    cl::Kernel* compress_kernel_lz4;
-    cl::Kernel* decompress_kernel_lz4;
+    uint32_t m_req_num;
+    /**
+     * @brief Class constructor
+     *
+     */
+    xfLz4(uint32_t req_num);
 
-    // Compression related
-    std::vector<uint8_t, aligned_allocator<uint8_t> > h_buf_in;
-    std::vector<uint8_t, aligned_allocator<uint8_t> > h_buf_out;
-    std::vector<uint32_t, aligned_allocator<uint8_t> > h_blksize;
-    std::vector<uint32_t, aligned_allocator<uint8_t> > h_compressSize;
-
-    // Device buffers
-    cl::Buffer* buffer_input;
-    cl::Buffer* buffer_output;
-    cl::Buffer* buffer_compressed_size;
-    cl::Buffer* buffer_block_size;
-
-    // Decompression related
-    std::vector<uint32_t> m_blkSize;
-    std::vector<uint32_t> m_compressSize;
-
-    // Kernel names
-    std::vector<std::string> compress_kernel_names = {"xilLz4Compress"};
-    std::vector<std::string> decompress_kernel_names = {"xilLz4Decompress"};
+    /**
+     * @brief Class destructor.
+     */
+    ~xfLz4();
 };
 
 #endif // _XFCOMPRESSION_LZ4_HPP_

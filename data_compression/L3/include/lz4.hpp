@@ -24,8 +24,8 @@
 #ifndef _XFCOMPRESSION_LZ4_HPP_
 #define _XFCOMPRESSION_LZ4_HPP_
 
-#include <iomanip>
-#include "xcl2.hpp"
+#include <cstdint>
+#include <string>
 
 /**
  * Maximum compute units supported
@@ -62,18 +62,6 @@ namespace compression {
  */
 class xfLz4 {
    public:
-    /**
-     * @brief Initialize the class object.
-     *
-     * @param binaryFile file to be read
-     */
-    int init(const std::string& binaryFile, uint8_t flow, uint32_t block_size_kb);
-
-    /**
-     * @brief release
-     *
-     */
-    int release();
 
     /**
      * @brief This module does the sequential execution of compression
@@ -85,7 +73,7 @@ class xfLz4 {
      * @param actual_size input size
      * @param host_buffer_size host buffer size
      */
-    uint64_t compress(uint8_t* in, uint8_t* out, uint64_t actual_size, uint32_t host_buffer_size, bool file_list_flag);
+    uint64_t compress(uint8_t* in, uint8_t* out, uint64_t actual_size, bool file_list_flag);
 
     /**
     * @brief Decompress.
@@ -101,7 +89,6 @@ class xfLz4 {
                         uint8_t* out,
                         uint64_t actual_size,
                         uint64_t original_size,
-                        uint32_t host_buffer_size,
                         bool file_list_flag);
 
     /**
@@ -115,8 +102,10 @@ class xfLz4 {
      * @param host_buffer_size host buffer size
      */
 
-    uint64_t decompressFile(
-        std::string& inFile_name, std::string& outFile_name, uint64_t actual_size, bool file_list_flag, bool m_flow);
+    uint64_t decompressFile(std::string& inFile_name,
+                            std::string& outFile_name,
+                            uint64_t actual_size,
+                            bool file_list_flag);
 
     /**
      * @brief This module is provided to support compress API and
@@ -127,62 +116,34 @@ class xfLz4 {
      * @param actual_size input size
      */
 
-    uint64_t compressFile(
-        std::string& inFile_name, std::string& outFile_name, uint64_t actual_size, bool file_list_flag, bool m_flow);
+    uint64_t compressFile(std::string& inFile_name,
+                          std::string& outFile_name,
+                          uint64_t actual_size,
+                          bool file_list_flag);
 
-    /**
-     * @brief Class constructor
-     *
-     */
-    xfLz4();
-
-    /**
-     * @brief Class destructor.
-     */
-    ~xfLz4();
-
-   private:
     /**
      * Block Size
      */
     uint32_t m_BlockSizeInKb;
 
     /**
-     * Binary flow compress/decompress
-     */
-    bool m_BinFlow;
-
-    /**
      * Switch between FPGA/Standard flows
      */
-    bool m_SwitchFlow;
+    bool m_switch_flow;
 
-    cl::Program* m_program;
-    cl::Context* m_context;
-    cl::CommandQueue* m_q;
-    cl::Kernel* compress_kernel_lz4[C_COMPUTE_UNIT];
-    cl::Kernel* decompress_kernel_lz4[D_COMPUTE_UNIT];
+    uint32_t m_req_num;
 
-    // Compression related
-    std::vector<uint8_t, aligned_allocator<uint8_t> > h_buf_in[MAX_COMPUTE_UNITS][OVERLAP_BUF_COUNT];
-    std::vector<uint8_t, aligned_allocator<uint8_t> > h_buf_out[MAX_COMPUTE_UNITS][OVERLAP_BUF_COUNT];
-    std::vector<uint32_t, aligned_allocator<uint8_t> > h_blksize[MAX_COMPUTE_UNITS][OVERLAP_BUF_COUNT];
-    std::vector<uint32_t, aligned_allocator<uint8_t> > h_compressSize[MAX_COMPUTE_UNITS][OVERLAP_BUF_COUNT];
+    /**
+     * @brief Class constructor
+     *
+     */
+    xfLz4(uint32_t req_num);
+    xfLz4();
 
-    // Device buffers
-    cl::Buffer* buffer_input[MAX_COMPUTE_UNITS][OVERLAP_BUF_COUNT];
-    cl::Buffer* buffer_output[MAX_COMPUTE_UNITS][OVERLAP_BUF_COUNT];
-    cl::Buffer* buffer_compressed_size[MAX_COMPUTE_UNITS][OVERLAP_BUF_COUNT];
-    cl::Buffer* buffer_block_size[MAX_COMPUTE_UNITS][OVERLAP_BUF_COUNT];
-
-    // Decompression related
-    std::vector<uint32_t> m_blkSize[MAX_COMPUTE_UNITS][OVERLAP_BUF_COUNT];
-    std::vector<uint32_t> m_compressSize[MAX_COMPUTE_UNITS][OVERLAP_BUF_COUNT];
-    std::vector<bool> m_is_compressed[MAX_COMPUTE_UNITS][OVERLAP_BUF_COUNT];
-
-    // Kernel names
-    std::vector<std::string> compress_kernel_names = {"xilLz4Compress"};
-    std::vector<std::string> decompress_kernel_names = {"xilLz4Decompress"};
+    /**
+     * @brief Class destructor.
+     */
+    ~xfLz4();
 };
 
 } // end namespace compression
