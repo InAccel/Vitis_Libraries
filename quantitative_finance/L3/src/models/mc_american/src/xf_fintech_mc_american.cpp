@@ -187,7 +187,7 @@ void MCAmerican::runInternal(OptionType optionType,
 			.arg(timeSteps);
 
 			inaccel::submit(pricing2).get();
-		} catch (std::runtime_error re) {
+		} catch (std::exception e) {
 			this->flag = 0;
 		}
 	}

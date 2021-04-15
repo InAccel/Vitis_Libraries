@@ -92,7 +92,7 @@ class MCAmerican:
 				pricing2.arg(stockPrice).arg(volatility).arg(dividendYield).arg(riskFreeRate).arg(timeToMaturity).arg(strikePrice).arg(optionType.value).arg(self.m_hostCoeffBuffer).arg(self.m_hostOutputBuffer2).arg(requiredTolerance).arg(requiredSamples).arg(timeSteps)
 
 				inaccel.submit(pricing2).result()
-			except RuntimeError:
+			except Exception:
 				self.flag = False
 
 		prcng1.result()
