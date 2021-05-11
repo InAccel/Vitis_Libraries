@@ -51,7 +51,7 @@ ErrCode RegexEngine::match_all(const uint64_t* msg_buff,
 	uint32_t cpgp_nm = reCfg.getCpgpNm();
 
 	// calculate the section number
-	timeval tv_start, tv_end, re_start, re_end;
+	timeval tv_start, tv_end;
 
 	gettimeofday(&tv_start, 0);
 	uint32_t max_slice_lnm = 0;
@@ -90,8 +90,6 @@ ErrCode RegexEngine::match_all(const uint64_t* msg_buff,
 	OnigErrorInfo einfo;
 	onig_new(&reg, pattern_c, pattern_c + strlen((char*)pattern_c), ONIG_OPTION_DEFAULT,
 									ONIG_ENCODING_ASCII, ONIG_SYNTAX_DEFAULT, &einfo);
-
-	gettimeofday(&re_start, 0);
 
 	omp_set_num_threads(cu_num);
 	#pragma omp parallel for
@@ -164,20 +162,10 @@ ErrCode RegexEngine::match_all(const uint64_t* msg_buff,
 		// copy result to output buffer
 		memcpy(out_buff + pos_per_sec[sec] * (cpgp_nm + 1), out_slice[tid] + 1, sz);
 	}
-	gettimeofday(&re_end, 0);
 
 	onig_region_free(region, 1);
 	onig_free(reg);
 	onig_end();
-
-	double re_tvtime = details::tvdiff(re_start, re_end);
-	double total_log_size = (double)offt_buff[total_lnm - 1] * 8 / 1024 / 1024;
-	std::cout << "regex pipelined, time: " << (double)re_tvtime / 1000 << " ms, size: " << total_log_size
-			  << " MB, throughput: " << total_log_size / 1024 / ((double)re_tvtime / 1000000) << " GB/s" << std::endl;
-	std::cout
-			<< "-----------------------------Finished regex pipelined test----------------------------------------------"
-			<< std::endl
-			<< std::endl;
 
 	return SUCCESS;
 }

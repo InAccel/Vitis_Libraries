@@ -172,7 +172,7 @@ int load_dat(
     return 0;
 }
 int main(int argc, const char* argv[]) {
-    std::cout << "----------------------log analytics with regex----------------" << std::endl;
+    std::cout << "----------------------------------------log analytics with regex----------------------------------------" << std::endl;
     // command argument parser
     // TODO use new argument parser from Utility library.
     xf::data_analytics::text::details::ArgParser parser(argc, argv);
@@ -235,12 +235,15 @@ int main(int argc, const char* argv[]) {
             return -1;
         }
         if (lnm > 0) {
-            struct timeval hw_start, hw_end, ref_start, ref_end;
+            struct timeval re_start, re_end;
             // call reInst to do regex
-            gettimeofday(&hw_start, 0);
+            gettimeofday(&re_start, 0);
             err_code = reInst.match(lnm, msg_buff, offt_buff, len_buff, out_buff);
-            gettimeofday(&hw_end, 0);
-            xf::data_analytics::text::details::tvdiff(hw_start, hw_end, "HW took");
+            gettimeofday(&re_end, 0);
+            double re_tvtime = xf::data_analytics::text::details::tvdiff(re_start, re_end);
+            double total_log_size = (double)offt_buff[lnm - 1] * 8 / 1024 / 1024;
+            std::cout << "HW regex pipelined, time: " << (double)re_tvtime / 1000 << " ms, size: " << total_log_size
+                      << " MB, throughput: " << total_log_size / 1024 / ((double)re_tvtime / 1000000) << " GB/s" << std::endl;
             if (err_code) {
                 std::cerr << "ERROR: match failed.\n";
                 return -1;
@@ -248,17 +251,20 @@ int main(int argc, const char* argv[]) {
             // write data to disk
             store_dat(out_file, out_buff, lnm, cpgp_nm);
             // if check is open, check the result with golden
-            gettimeofday(&ref_start, NULL);
+            gettimeofday(&re_start, 0);
             int r = check_result(pattern, msg_buff, offt_buff, len_buff, out_buff, lnm, cpgp_nm);
-            gettimeofday(&ref_end, NULL);
-            xf::data_analytics::text::details::tvdiff(ref_start, ref_end, "SW took");
+            gettimeofday(&re_end, 0);
+            double _re_tvtime = xf::data_analytics::text::details::tvdiff(re_start, re_end);
+            std::cout << "SW regex, time: " << (double)_re_tvtime / 1000 << " ms, size: " << total_log_size
+                      << " MB, throughput: " << total_log_size / 1024 / ((double)_re_tvtime / 1000000) << " GB/s" << std::endl;
             if (r == -1) {
-                fprintf(stderr, "ERROR: result mismatch\n");
+                fprintf(stderr, "ERROR: result mismatch, speedup: %.2f\n", _re_tvtime/re_tvtime);
             } else {
-                fprintf(stdout, "SUCCESS: result match\n");
+                fprintf(stdout, "SUCCESS: result match, speedup: %.2f\n", _re_tvtime/re_tvtime);
             }
         }
     }
+    std::cout << "--------------------------------------Finished regex pipelined test-------------------------------------" << std::endl;
     log_file.close();
     out_file.close();
     std::quick_exit(0);
