@@ -23,8 +23,8 @@ namespace re {
 reConfig::reConfig(const uint32_t instr_depth, const uint32_t char_class_num, const uint32_t capture_grp_num)
     : kInstrDepth(instr_depth), kCharClassNum(char_class_num), kCaptureGrpNum(capture_grp_num) {
     // allocate buffer
-    re_cfg = mm.aligned_alloc<uint64_t>(kInstrDepth + kCharClassNum * 4 + 2);
-    bitset = mm.aligned_alloc<uint32_t>(kCharClassNum * 8);
+    re_cfg = (uint64_t *) malloc((kInstrDepth + kCharClassNum * 4 + 2) * sizeof(uint64_t));
+    bitset = (uint32_t *) malloc((kCharClassNum * 8) * sizeof(uint32_t));
     // initialization
     this->instr_num = 0;
     this->cclass_num = 0;

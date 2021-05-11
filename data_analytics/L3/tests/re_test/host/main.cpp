@@ -58,7 +58,7 @@ int check_result(std::string pattern,
         return -1;
     }
     unsigned char* max_str = (unsigned char*)malloc(MAX_MSG_LEN);
-    for (int i = 0; i < lnm; ++i) {
+    for (unsigned i = 0; i < lnm; ++i) {
         // generate referecne
         int offt = offt_buff[i];
         memcpy(max_str, &msg_buff[offt], len_buff[i]);
@@ -72,9 +72,9 @@ int check_result(std::string pattern,
         // match
         if (r == 0) {
             if (out_buff[i * (cpgp_nm + 1)] == 1) {
-                for (int j = 0; j < cpgp_nm; ++j) {
-                    if (region->beg[j] != out_buff[i * (cpgp_nm + 1) + j + 1] % 65536 ||
-                        region->end[j] != out_buff[i * (cpgp_nm + 1) + j + 1] / 65536) {
+                for (unsigned j = 0; j < cpgp_nm; ++j) {
+                    if ((unsigned) region->beg[j] != out_buff[i * (cpgp_nm + 1) + j + 1] % 65536 ||
+                        (unsigned) region->end[j] != out_buff[i * (cpgp_nm + 1) + j + 1] / 65536) {
                         fprintf(stderr, "ERROR: msg: %d, capture group: %d, ref:[%d, %d], act:[%d, %d]\n", i, j,
                                 region->beg[j], region->end[j], out_buff[i * (cpgp_nm + 1) + j + 1] % 65536,
                                 out_buff[i * (cpgp_nm + 1) + j + 1] / 65536);
@@ -142,7 +142,7 @@ int load_dat(
     std::string line;
     uint32_t offt = 0;
     while (!log_file.eof() && (offt < (MAX_MSG_DEPTH - MAX_MSG_LEN / 8)) && lnm < MAX_LNM &&
-           (limit_ln == -1 || lnm < limit_ln)) {
+           (limit_ln == -1 || (int) lnm < limit_ln)) {
         getline(log_file, line);
         size_t sz = line.size();
         // max line
@@ -153,7 +153,7 @@ int load_dat(
         } else if (sz > 0) {
             offt_buff[lnm] = offt;
             len_buff[lnm] = sz;
-            for (int i = 0; i < (sz + 7) / 8; ++i) {
+            for (unsigned i = 0; i < (sz + 7) / 8; ++i) {
                 uint64_un out;
                 for (unsigned int j = 0; j < 8; ++j) {
                     if (i * 8 + j < sz) {
@@ -177,11 +177,6 @@ int main(int argc, const char* argv[]) {
     // TODO use new argument parser from Utility library.
     xf::data_analytics::text::details::ArgParser parser(argc, argv);
 
-    std::string xclbin_path;
-    if (!parser.getCmdOption("-xclbin", xclbin_path)) {
-        std::cout << "ERROR: xclbin path is not set!\n";
-        return 1;
-    }
     std::string log_path;
     if (!parser.getCmdOption("-in", log_path)) {
         std::cout << "ERROR:  input log path is not specified.\n";
@@ -207,15 +202,13 @@ int main(int argc, const char* argv[]) {
         "\"(?<agent>[^\\\"]*)\"(?:\\s+(?<http_x_forwarded_for>[^ ]+))?)?$";
 
     // allocate the in-memory buffer
-    xf::data_analytics::text::details::MM mm;
-    uint64_t* msg_buff = mm.aligned_alloc<uint64_t>(MAX_MSG_DEPTH);
-    uint32_t* offt_buff = mm.aligned_alloc<uint32_t>(MAX_LNM);
-    uint16_t* len_buff = mm.aligned_alloc<uint16_t>(MAX_LNM);
-    uint32_t* out_buff = mm.aligned_alloc<uint32_t>(MAX_OUT_DEPTH);
+    uint64_t* msg_buff = (uint64_t*) malloc(MAX_MSG_DEPTH * sizeof(uint64_t));
+    uint32_t* offt_buff = (uint32_t*) malloc(MAX_LNM * sizeof(uint32_t));
+    uint16_t* len_buff = (uint16_t*) malloc(MAX_LNM * sizeof(uint16_t));
+    uint32_t* out_buff = (uint32_t*) malloc(MAX_OUT_DEPTH * sizeof(uint32_t));
     // constructor of reEngine
-    xf::data_analytics::text::re::RegexEngine reInst(xclbin_path, 0,                          // device config
-                                                     INSTR_DEPTH, CCLASS_NM, CPGP_NM, MSG_SZ, // re limits
-                                                     SLICE_SZ, SLICE_NM);                     // prcessing
+    xf::data_analytics::text::re::RegexEngine reInst(INSTR_DEPTH, CCLASS_NM, CPGP_NM, MSG_SZ, // re limits
+                                                     SLICE_SZ, SLICE_NM);                     // processing
     xf::data_analytics::text::re::ErrCode err_code;
     // compile pattern
     err_code = reInst.compile(pattern);
@@ -236,14 +229,18 @@ int main(int argc, const char* argv[]) {
         std::cerr << "ERROR: " << out_path << " cannot be opened for write.\n";
         return -1;
     }
-    while (!log_file.eof() && (limit_ln == -1 || lnm < limit_ln)) {
+    while (!log_file.eof() && (limit_ln == -1 || (int) lnm < limit_ln)) {
         // load data
         if (load_dat(log_file, msg_buff, offt_buff, len_buff, lnm, limit_ln) == -1) {
             return -1;
         }
         if (lnm > 0) {
+            struct timeval hw_start, hw_end, ref_start, ref_end;
             // call reInst to do regex
+            gettimeofday(&hw_start, 0);
             err_code = reInst.match(lnm, msg_buff, offt_buff, len_buff, out_buff);
+            gettimeofday(&hw_end, 0);
+            xf::data_analytics::text::details::tvdiff(hw_start, hw_end, "HW took");
             if (err_code) {
                 std::cerr << "ERROR: match failed.\n";
                 return -1;
@@ -251,7 +248,10 @@ int main(int argc, const char* argv[]) {
             // write data to disk
             store_dat(out_file, out_buff, lnm, cpgp_nm);
             // if check is open, check the result with golden
+            gettimeofday(&ref_start, NULL);
             int r = check_result(pattern, msg_buff, offt_buff, len_buff, out_buff, lnm, cpgp_nm);
+            gettimeofday(&ref_end, NULL);
+            xf::data_analytics::text::details::tvdiff(ref_start, ref_end, "SW took");
             if (r == -1) {
                 fprintf(stderr, "ERROR: result mismatch\n");
             } else {

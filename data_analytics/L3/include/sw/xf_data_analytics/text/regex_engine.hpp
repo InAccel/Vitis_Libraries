@@ -17,14 +17,7 @@
 #ifndef _RE_ENGNINE_L3_
 #define _RE_ENGNINE_L3_
 
-#include <iostream>
-#include <thread>
-#include <atomic>
-#include <algorithm>
-#include <queue>
-#include <cstring>
 #include "xf_data_analytics/text/reEngine_config.hpp"
-#include "xf_data_analytics/text/helper.hpp"
 
 namespace xf {
 namespace data_analytics {
@@ -37,23 +30,6 @@ namespace re {
  */
 class RegexEngine {
    private:
-    // variable for platform
-    /// Error code
-    cl_int err;
-    /// Context
-    cl_context ctx;
-    /// Device ID
-    cl_device_id dev_id;
-    /// Command queue
-    cl_command_queue cq;
-    /// Program
-    cl_program prg;
-    /// Path to FPGA binary
-    std::string xclbin_path;
-
-    /// Kernel name
-    const char* kernel_name = "reEngineKernel";
-
     /// Object for generating the configurations
     reConfig reCfg;
 
@@ -61,7 +37,7 @@ class RegexEngine {
     const int kCharClassNum;
     const int kCaptureGrpNum;
     const int kMsgSize;
-    const int kMaxSliceSize;
+    const unsigned kMaxSliceSize;
     const int kMaxSliceNum;
 
     /**
@@ -96,10 +72,7 @@ class RegexEngine {
 
    public:
     /**
-     * @brief Default constructor for loading and programming binary
-     *
-     * @param xclbin Path to FPGA binary.
-     * @param dev_index The index of Xilinx OpenCL device.
+     * @brief Default constructor
      *
      * @param instr_depth Max number of instructions.
      * @param char_class_num Max number of character classes.
@@ -109,18 +82,12 @@ class RegexEngine {
      * @parma max_slice_size Max message slice size, in number of bytes.
      * @param max_slice_num  Max message slice number.
      */
-    RegexEngine(const std::string& xclbin,
-                const int dev_index = 0,
-                const int instr_depth = 4096,
+    RegexEngine(const int instr_depth = 4096,
                 const int char_class_num = 128,
                 const int capture_grp_num = 512,
                 const int msg_size = 4096,
                 const int max_slice_size = 5242880,
                 const int max_slice_num = 256);
-    /**
-     * @brief Default de-constructor for releasing program/command-queue/contect
-     */
-    ~RegexEngine();
     /**
      * @brief Pre-compiles pattern and gives error code correspondingly
      *

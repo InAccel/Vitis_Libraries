@@ -93,19 +93,14 @@ export XCL_BINDIR = $(XCLBIN_DIR)
 HOST_SRCS += $(CUR_DIR)//host/main.cpp
 HOST_SRCS += $(XFLIB_DIR)/L3/src/sw/text/regex_engine.cpp
 HOST_SRCS += $(XFLIB_DIR)/L3/src/sw/text/reEngine_config.cpp
-HOST_SRCS += $(XFLIB_DIR)/ext/xcl2/xcl2.cpp
 CXXFLAGS += -I$(CUR_DIR)//kernel
 CXXFLAGS += -I$(CUR_DIR)//re_compile/lib/include
-CXXFLAGS += -I$(XFLIB_DIR)/L1/include/sw
 CXXFLAGS += -I$(XFLIB_DIR)/L3/include/sw
-CXXFLAGS += -I$(XFLIB_DIR)/ext/xcl2
 LDFLAGS += -L$(CUR_DIR)//re_compile/lib/lib
 LDFLAGS += -lonig
 LDFLAGS += -lxfcompile
-LDFLAGS += 
-CXXFLAGS += -I$(XFLIB_DIR)/L1/include/sw
-CXXFLAGS += -I$(XFLIB_DIR)/L3/include/sw
-CXXFLAGS += -I$(XFLIB_DIR)/ext/xcl2
+LDFLAGS += -lcoral-api -pthread
+CXXFLAGS += -I$(XFLIB_DIR)/L1/include/sw -fopenmp
 
 LDFLAGS +=
 
@@ -119,14 +114,10 @@ CXXFLAGS += -D HW_EMU_TEST
 endif
 
 # ######################### Host compiler global settings ############################
-CXXFLAGS += -I$(XILINX_XRT)/include -I$(XILINX_VIVADO)/include -std=c++11 -O3 -Wall -Wno-unknown-pragmas -Wno-unused-label
-LDFLAGS += -L$(XILINX_XRT)/lib -lOpenCL -lpthread -lrt -Wno-unused-label -Wno-narrowing -DVERBOSE
-CXXFLAGS += -fmessage-length=0 -O3 
+CXXFLAGS += -std=c++11 -O3 -Wall -Wno-unknown-pragmas -Wno-unused-label
+#LDFLAGS += -L$(XILINX_XRT)/lib -lOpenCL -lpthread -lrt -Wno-unused-label -Wno-narrowing -DVERBOSE
+CXXFLAGS += -fmessage-length=0
 CXXFLAGS += -I$(CUR_DIR)/src/ 
-
-ifeq ($(HOST_ARCH), x86)
-LDFLAGS += -L$(XILINX_VIVADO)/lnx64/tools/fpo_v7_0 -Wl,--as-needed -lgmp -lmpfr -lIp_floating_point_v7_0_bitacc_cmodel
-endif
 
 # ################### Setting package and image directory #######################
 
@@ -141,7 +132,7 @@ HOST_ARGS :=  -xclbin $(BUILD_DIR)/reEngineKernel.xclbin -in $(XFLIB_DIR)/L2/tes
 LIBRARY_PATH =$(CUR_DIR)/re_compile/lib/lib:$(LD_LIBRARY_PATH)
 endif
 ifeq ($(TARGET),$(filter $(TARGET),hw))
-HOST_ARGS :=  -xclbin $(BUILD_DIR)/reEngineKernel.xclbin -in $(XFLIB_DIR)/L2/tests/text/reEngine/log_data/access_5k.log -out $(CUR_DIR)/check.log
+HOST_ARGS :=  -in $(XFLIB_DIR)/L2/tests/text/reEngine/log_data/access_5k.log -out $(CUR_DIR)/check.log
 LIBRARY_PATH =$(CUR_DIR)/re_compile/lib/lib:$(LD_LIBRARY_PATH)
 endif
 

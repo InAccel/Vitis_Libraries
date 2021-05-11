@@ -17,10 +17,6 @@
 #define XF_TEXT_RE_ENGNINE_CONFIG_H
 
 #include <iostream>
-#include <thread>
-#include <atomic>
-#include <algorithm>
-#include <queue>
 #include <cstring>
 
 #include "xf_data_analytics/text/helper.hpp"
@@ -52,8 +48,6 @@ enum ErrCode {
  */
 class reConfig {
    private:
-    /// aligned buffer allocator
-    details::MM mm;
     /// buffer for configuration
     uint64_t* re_cfg;
     /// bit-set map buffer
