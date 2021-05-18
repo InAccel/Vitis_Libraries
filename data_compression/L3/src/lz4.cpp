@@ -210,6 +210,7 @@ uint64_t xfLz4::compress(
             if(chunkIdx+reqIdx < chunk_num)
                 responses[reqIdx].get();
         }
+        responses.clear();
 
         auto kernel_end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration<double, std::nano>(kernel_end - kernel_start);
@@ -403,7 +404,7 @@ uint64_t xfLz4::decompress(uint8_t* in,
 
     std::chrono::duration<double, std::nano> kernel_time_ns_1(0);
 
-    std::vector<std::future<void>> responses(
+    std::vector<std::future<void>> responses;
 
     uint64_t total_decompressed_size = 0;
 
@@ -507,6 +508,7 @@ uint64_t xfLz4::decompress(uint8_t* in,
         for (unsigned reqIdx = 0; reqIdx < responses.size(); reqIdx++) {
             responses[reqIdx].get();
         }
+        responses.clear();
 
         auto kernel_end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration<double, std::nano>(kernel_end - kernel_start);
